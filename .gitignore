@@ -1,0 +1,8 @@
+venv/
+__pycache__/
+*.pyc
+config.json
+.superpowers/
+dist/
+build/
+*.spec
