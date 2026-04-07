@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JAPW: Just A Pinterest Wrapper</title>
+  <meta name="description" content="Search and download Pinterest images with a beautiful desktop experience.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="preconnect" href="https://i.pinimg.com" crossorigin>
+  <link rel="dns-prefetch" href="https://i.pinimg.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="splash-active">
+  <div id="splash" class="splash" aria-hidden="false" aria-busy="true" aria-live="polite">
+    <div class="splash-glow" aria-hidden="true"></div>
+    <div class="splash-inner">
+      <div class="splash-brand">
+        <span class="splash-wordmark">JAPW</span>
+        <span class="splash-tagline">Just A Pinterest Wrapper</span>
+      </div>
+      <div class="splash-loader">
+        <div class="splash-bar" aria-hidden="true"><div class="splash-bar-fill"></div></div>
+        <p class="splash-label" id="splash-label">Loading home feed</p>
+      </div>
+    </div>
+  </div>
+  <header class="topbar" id="topbar">
+    <div class="topbar-title">JAPW</div>
+    <nav class="topbar-tabs" aria-label="View mode">
+      <button type="button" class="tab-btn active" id="tab-home" data-tab="home" aria-pressed="true">Home</button>
+      <button type="button" class="tab-btn" id="tab-search" data-tab="search" aria-pressed="false">Search</button>
+      <button type="button" class="tab-btn" id="tab-liked" data-tab="liked" aria-pressed="false">Liked</button>
+      <button type="button" class="tab-btn" id="tab-collections" data-tab="collections" aria-pressed="false">Collections</button>
+      <button type="button" class="tab-btn" id="tab-artists" data-tab="artists" aria-pressed="false">Artists</button>
+    </nav>
+    <div class="topbar-search hidden" id="search-row">
+      <input type="text" id="search-input" placeholder="Search Pinterest for images…" autocomplete="off" spellcheck="false">
+      <button id="search-btn" aria-label="Search">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="8"/>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+      </button>
+      <div id="search-history-dropdown" class="search-history-dropdown hidden"></div>
+    </div>
+    <div class="topbar-spacer" id="topbar-spacer" aria-hidden="true"></div>
+    <span class="auth-badge" id="auth-badge" title="Pinterest session">Pinterest: …</span>
+    <button id="bulk-toggle-btn" class="icon-btn" aria-label="Select mode" title="Select images">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="5" height="5" rx="1"/><rect x="10" y="3" width="5" height="5" rx="1"/><rect x="17" y="3" width="5" height="5" rx="1"/><rect x="3" y="10" width="5" height="5" rx="1"/><polyline points="10 13.5 12 15.5 16 11.5"/><rect x="17" y="10" width="5" height="5" rx="1"/><rect x="3" y="17" width="5" height="5" rx="1"/><rect x="10" y="17" width="5" height="5" rx="1"/><rect x="17" y="17" width="5" height="5" rx="1"/></svg>
+    </button>
+    <button id="settings-btn" aria-label="Settings">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    </button>
+  </header>
+
+  <!-- X Artists toolbar (shown only on Artists tab, sticky below topbar) -->
+  <div id="x-filter-bar" class="x-filter-bar hidden" aria-label="Artist toolbar">
+    <div class="x-filter-bar-main">
+      <div class="x-toolbar-left">
+        <div id="x-filter-pills" class="x-filter-pills" role="group" aria-label="Filter by artist"></div>
+      </div>
+      <div class="x-toolbar-actions">
+        <button type="button" id="x-refresh-btn" class="x-toolbar-btn" title="Refresh media">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-1.64-8.36L23 10"/></svg>
+          Refresh
+        </button>
+        <button type="button" id="x-manage-btn" class="x-toolbar-btn x-toolbar-btn--primary" title="Manage artists">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Manage
+        </button>
+      </div>
+    </div>
+    <div id="x-fetch-banner" class="x-fetch-banner hidden" aria-live="polite" aria-atomic="true">
+      <div class="x-fetch-track" aria-hidden="true"><div class="x-fetch-fill"></div></div>
+      <span id="x-fetch-label" class="x-fetch-label">Fetching media…</span>
+    </div>
+  </div>
+
+  <main id="gallery" class="gallery">
+    <div id="empty-state" class="empty-state">
+      <div class="empty-state-icon">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+          <circle cx="8.5" cy="8.5" r="1.5"/>
+          <polyline points="21 15 16 10 5 21"/>
+        </svg>
+      </div>
+      <p id="empty-title">Your Pinterest home feed</p>
+      <span class="subtext" id="empty-sub">Connect in Settings, then load your personalized home pins here.</span>
+    </div>
+    <div id="infinite-sentinel" class="infinite-sentinel hidden" aria-hidden="true">
+      <span class="infinite-sentinel-hint" id="infinite-hint"></span>
+    </div>
+  </main>
+
+  <div id="collections-view" class="collections-view hidden"></div>
+
+  <div id="bulk-bar" class="bulk-bar hidden">
+    <span id="bulk-count-label">0 selected</span>
+    <div class="bulk-bar-actions">
+      <button id="bulk-download-btn" class="bulk-action-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Download selected
+      </button>
+      <button id="bulk-clear-btn" class="bulk-action-btn secondary">Clear</button>
+    </div>
+  </div>
+
+  <div id="loading" class="loading hidden">
+    <div class="spinner"></div>
+  </div>
+
+  <div id="modal" class="modal">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content">
+      <div class="modal-stage">
+        <img id="modal-img" src="" alt="Preview">
+        <video id="modal-video" autoplay loop muted playsinline style="display:none;width:100%;height:auto;"></video>
+        <p id="modal-slideshow-hint" class="modal-slideshow-hint hidden" aria-live="polite"></p>
+        <button id="modal-prev" class="modal-nav-btn prev" aria-label="Previous image">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="15 18 9 12 15 6"/>
+          </svg>
+        </button>
+        <button id="modal-next" class="modal-nav-btn next" aria-label="Next image">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="9 18 15 12 9 6"/>
+          </svg>
+        </button>
+        <button type="button" id="modal-download-all" class="modal-download-all-btn hidden" aria-label="Download all images in this pin">
+          Download all
+        </button>
+        <button id="modal-download" class="modal-download-btn">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          Download
+        </button>
+        <button id="modal-close" class="modal-close-btn">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+      <div id="modal-related" class="modal-related hidden" role="region" aria-label="Similar pins"></div>
+    </div>
+  </div>
+
+  <!-- X Artists manage panel -->
+  <div id="x-panel-backdrop" class="x-panel-backdrop"></div>
+  <div id="x-panel" class="x-panel" role="dialog" aria-modal="true" aria-label="Manage artists">
+    <div class="x-panel-header">
+      <div class="x-panel-header-text">
+        <h2>Artists</h2>
+        <p class="x-panel-header-sub">X / Twitter creators</p>
+      </div>
+      <button id="x-panel-close" aria-label="Close artists panel">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+    <div class="x-panel-body">
+      <section class="x-panel-card">
+        <h3 class="x-panel-card-title">Add artist</h3>
+        <div class="x-add-form">
+          <input id="x-add-input" type="text" class="x-add-input" placeholder="@username" autocomplete="off" spellcheck="false" maxlength="50">
+          <button id="x-add-btn" type="button" class="x-add-btn">Add</button>
+        </div>
+      </section>
+      <section class="x-panel-card">
+        <h3 class="x-panel-card-title">X / Twitter session</h3>
+        <div class="x-session-row">
+          <span id="x-session-status" class="x-session-status">Not connected</span>
+          <button id="x-sync-btn" type="button" class="x-sync-btn">Sync from browser</button>
+          <button id="x-disconnect-btn" type="button" class="x-disconnect-btn hidden">Disconnect</button>
+        </div>
+        <p class="x-panel-hint">Reads cookies from Zen, Chrome, Firefox, and others. Close the browser first if the cookie file is locked.</p>
+      </section>
+      <section class="x-panel-card x-panel-card--list">
+        <h3 class="x-panel-card-title">Your artists</h3>
+        <div id="x-artists-list" class="x-artists-list"></div>
+      </section>
+    </div>
+  </div>
+
+  <div id="settings-backdrop" class="settings-backdrop"></div>
+  <div id="settings-panel" class="settings-panel">
+    <div class="settings-header">
+      <div class="settings-header-text">
+        <h2>Settings</h2>
+        <p class="settings-header-sub">Session, downloads &amp; display</p>
+      </div>
+      <button id="settings-close" aria-label="Close settings">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+    <div class="settings-body">
+
+      <section class="settings-card" aria-labelledby="settings-card-pinterest">
+        <h3 class="settings-card-title" id="settings-card-pinterest">Pinterest account</h3>
+        <p class="settings-status settings-status--idle" id="pinterest-status" role="status">Not connected</p>
+        <div class="settings-pinterest-row">
+          <button type="button" id="pinterest-connect-btn" class="btn-primary">Sync from browser</button>
+          <button type="button" id="pinterest-open-browser-btn" class="secondary">Open Pinterest</button>
+          <button type="button" id="pinterest-disconnect-btn" class="secondary hidden">Disconnect</button>
+        </div>
+        <p class="settings-micro">Reads cookies from Chrome, Firefox, Edge, Brave, Zen, Opera, Vivaldi and others. Close the browser first if the cookie file is locked. Your password is never stored.</p>
+      </section>
+
+
+      <section class="settings-card" aria-labelledby="settings-card-downloads">
+        <h3 class="settings-card-title" id="settings-card-downloads">Download folder</h3>
+        <label class="settings-field-label" for="download-folder">Save images to</label>
+        <div class="settings-folder-row">
+          <input type="text" id="download-folder" readonly placeholder="Choose a folder…">
+          <button type="button" id="folder-picker-btn">Browse</button>
+        </div>
+      </section>
+
+      <section class="settings-card" aria-labelledby="settings-card-resolution">
+        <div class="settings-card-title-row">
+          <h3 class="settings-card-title" id="settings-card-resolution">Wallpaper filter</h3>
+          <label class="settings-toggle" for="resolution-filter-enabled" aria-label="Enable wallpaper filter">
+            <input type="checkbox" id="resolution-filter-enabled">
+            <span class="settings-toggle-track"></span>
+          </label>
+        </div>
+        <p class="settings-hint">Show only pins whose image matches your target size — useful for finding desktop wallpapers.</p>
+        <div class="settings-resolution-grid">
+          <div class="settings-resolution-field">
+            <label class="settings-field-label" for="resolution-width">Width</label>
+            <input type="number" id="resolution-width" min="1" max="16384" value="1920" placeholder="1920">
+          </div>
+          <div class="settings-resolution-field">
+            <label class="settings-field-label" for="resolution-height">Height</label>
+            <input type="number" id="resolution-height" min="1" max="16384" value="1080" placeholder="1080">
+          </div>
+          <div class="settings-resolution-field">
+            <label class="settings-field-label" for="resolution-match-mode">Match</label>
+            <select id="resolution-match-mode">
+              <option value="min">At least</option>
+              <option value="exact">Exact ±2%</option>
+            </select>
+          </div>
+        </div>
+        <button type="button" id="resolution-filter-save-btn" class="settings-save-btn">Apply filter</button>
+      </section>
+
+      <section class="settings-card" aria-labelledby="settings-card-content-filters">
+        <h3 class="settings-card-title settings-card-title--plain" id="settings-card-content-filters">Pinterest content filters</h3>
+        <div class="settings-row">
+          <div class="settings-row-left">
+            <label class="settings-label" for="filter-promoted">Hide promoted posts</label>
+            <p class="settings-hint settings-hint--tight">Remove sponsored and promoted pins from your feed and search results.</p>
+          </div>
+          <label class="settings-toggle" for="filter-promoted" aria-label="Hide promoted posts">
+            <input type="checkbox" id="filter-promoted">
+            <span class="settings-toggle-track"></span>
+          </label>
+        </div>
+        <div class="settings-row settings-row--separator">
+          <div class="settings-row-left">
+            <label class="settings-label" for="filter-ai-content">Hide AI-modified content</label>
+            <p class="settings-hint settings-hint--tight">Remove pins labelled "AI modified" or "AI generated" by Pinterest.</p>
+          </div>
+          <label class="settings-toggle" for="filter-ai-content" aria-label="Hide AI-modified content">
+            <input type="checkbox" id="filter-ai-content">
+            <span class="settings-toggle-track"></span>
+          </label>
+        </div>
+      </section>
+
+      <section class="settings-card" aria-labelledby="settings-card-data">
+        <h3 class="settings-card-title settings-card-title--plain" id="settings-card-data">Backup &amp; restore</h3>
+        <p class="settings-hint">Export your likes, collections, artists and settings to a file so you can recreate your feed on any device.</p>
+        <div class="settings-backup-row">
+          <button type="button" id="export-btn" class="btn-primary">Export backup</button>
+          <button type="button" id="import-btn" class="secondary">Import backup</button>
+          <input type="file" id="import-file-input" accept=".json,application/json" style="display:none">
+        </div>
+      </section>
+
+      <section class="settings-card settings-card-about" aria-labelledby="settings-card-about">
+        <h3 class="settings-card-title settings-card-title--plain" id="settings-card-about">About</h3>
+        <p class="settings-about-name">JAPW</p>
+        <p class="settings-about-tagline">Just A Pinterest Wrapper</p>
+        <p class="settings-hint settings-hint--tight">A minimal desktop viewer for your Pinterest home feed and search. Import your browser session to browse and download pins without the full site.</p>
+        <p class="settings-micro settings-about-meta">Playwright · Flask · pywebview</p>
+      </section>
+
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <div id="prompt-dialog" class="prompt-dialog hidden" role="dialog" aria-modal="true">
+    <div class="prompt-dialog-backdrop"></div>
+    <div class="prompt-dialog-panel">
+      <div class="prompt-dialog-header">
+        <span id="prompt-dialog-title" class="prompt-dialog-title">New collection</span>
+        <button id="prompt-dialog-close" class="col-dialog-close-btn" aria-label="Close">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="prompt-dialog-body">
+        <input type="text" id="prompt-dialog-input" class="prompt-dialog-input" placeholder="Collection name…" maxlength="100" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="prompt-dialog-footer">
+        <button id="prompt-dialog-cancel" class="prompt-dialog-btn secondary">Cancel</button>
+        <button id="prompt-dialog-confirm" class="prompt-dialog-btn primary">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="col-dialog" class="col-dialog hidden" role="dialog" aria-modal="true">
+    <div class="col-dialog-backdrop"></div>
+    <div class="col-dialog-panel">
+      <div class="col-dialog-header">
+        <span class="col-dialog-title">Add to collection</span>
+        <button id="col-dialog-close" class="col-dialog-close-btn" aria-label="Close">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div id="col-dialog-list" class="col-dialog-list"></div>
+      <div class="col-dialog-new">
+        <input type="text" id="col-dialog-input" placeholder="New collection name…" maxlength="100">
+        <button id="col-dialog-create-btn">Create &amp; add</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="confirm-dialog" class="prompt-dialog hidden" role="dialog" aria-modal="true">
+    <div class="prompt-dialog-backdrop"></div>
+    <div class="prompt-dialog-panel">
+      <div class="prompt-dialog-header">
+        <span id="confirm-dialog-title" class="prompt-dialog-title">Are you sure?</span>
+      </div>
+      <div class="prompt-dialog-body">
+        <p id="confirm-dialog-message" class="confirm-dialog-message"></p>
+      </div>
+      <div class="prompt-dialog-footer">
+        <button id="confirm-dialog-cancel" class="prompt-dialog-btn secondary">Cancel</button>
+        <button id="confirm-dialog-confirm" class="prompt-dialog-btn danger">Remove</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

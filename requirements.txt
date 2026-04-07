@@ -1,3 +1,6 @@
 flask==3.1.*
+pywebview==5.*
+pinscrape==5.*
+playwright>=1.40
+browser-cookie3>=0.19.1
 requests==2.*
-pytest==7.2.*

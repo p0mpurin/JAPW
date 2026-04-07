@@ -1,8 +1,55 @@
-venv/
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
-*.pyc
-config.json
-.superpowers/
-dist/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# ── Virtual environments ───────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+
+# ── Build & distribution ───────────────────────────────────────────────────────
 build/
+dist/
+*.egg-info/
 *.spec
+!JAPW.spec
+
+# ── Generated assets ───────────────────────────────────────────────────────────
+logo.ico
+
+# ── Runtime / user data  (lives in AppData at runtime, never in the repo) ─────
+config.json
+likes.json
+collections.json
+homefeed.json
+saved_boards.json
+x_artists.json
+x_media_cache.json
+x_state.json
+pinterest_state.json
+data/
+
+# ── Playwright ─────────────────────────────────────────────────────────────────
+playwright-browsers/
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── IDE / editor ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Tooling ───────────────────────────────────────────────────────────────────
+.claude/
+.superpowers/
