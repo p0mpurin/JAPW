@@ -2,7 +2,6 @@
 
 JAPW is a small **desktop app** for browsing Pinterest (and a little bit of X) in its own window. You get your **home feed**, **search**, **boards**, **similar pins**, **likes**, **collections**, and **downloads** without juggling a million browser tabs. Under the hood it’s a tiny **Flask** server plus static pages, wrapped in **pywebview** on Windows so it feels like a normal app.
 
-If you want the full checklist of what every part does, see **[FEATURES.md](FEATURES.md)**.
 
 This project isn’t affiliated with Pinterest or X. Use it in a way that respects their rules and whatever applies where you live.
 
