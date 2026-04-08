@@ -777,7 +777,26 @@ def _api_pin_to_post(pin: dict) -> dict | None:
     if not urls:
         return None
 
+    # Extract original image dimensions from the best available size entry.
+    width, height = None, None
+    for size_key in ("originals", "736x", "474x", "236x"):
+        entry = main_images.get(size_key)
+        if isinstance(entry, dict):
+            w = entry.get("width")
+            h = entry.get("height")
+            if w and h:
+                try:
+                    wi, hi = int(w), int(h)
+                    if wi > 0 and hi > 0:
+                        width, height = wi, hi
+                        break
+                except (TypeError, ValueError):
+                    pass
+
     post: dict = {"urls": urls}
+    if width and height:
+        post["width"] = width
+        post["height"] = height
     if pin_id:
         post["pin_url"] = f"https://www.pinterest.com/pin/{pin_id}/"
     return post

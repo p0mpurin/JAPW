@@ -1975,14 +1975,21 @@
       img.onload = function () {
         if (skeleton.parentNode) skeleton.remove();
         item.style.minHeight = "";
-        if (resFilter.enabled) {
+        // Use API dimensions if available, else fall back to URL estimate
+        var rw = post.width || 0;
+        var rh = post.height || 0;
+        if (!rw || !rh) {
           var est = estimateSizeFromUrl(url);
-          if (est && !passesResolutionFilter(est.w, est.h)) {
-            removeFilteredPost(item, postKey);
-            return;
-          }
+          if (est) { rw = est.w; rh = est.h; }
         }
-        meta.textContent = urlHints || "";
+        if (resFilter.enabled && rw && rh && !passesResolutionFilter(rw, rh)) {
+          removeFilteredPost(item, postKey);
+          return;
+        }
+        // Show real resolution; fall back to naturalWidth × naturalHeight if no API dims
+        var dispW = (post.width && post.width < 9000) ? post.width : img.naturalWidth;
+        var dispH = (post.height && post.height < 9000) ? post.height : img.naturalHeight;
+        meta.textContent = (dispW && dispH) ? (dispW + " \xd7 " + dispH) : (urlHints || "");
       };
       var thumbSrc = isGif ? url : thumbnailUrl(url);
       img.onerror = isGif
@@ -2173,7 +2180,7 @@
     seenPostKeys = new Set();
     feedPosts = [];
     posts.forEach(function (p) {
-      var post = { urls: (p.urls || []).slice(), pin_url: p.pin_url || null };
+      var post = { urls: (p.urls || []).slice(), pin_url: p.pin_url || null, width: p.width || 0, height: p.height || 0 };
       if (!post.urls.length) return;
       var k = canonicalKeyFromPinimgUrl(post.urls[0]);
       if (!k || seenPostKeys.has(k)) return;
@@ -2189,7 +2196,7 @@
   function appendPosts(newPosts) {
     var anim = 0;
     newPosts.forEach(function (raw) {
-      var post = { urls: (raw.urls || []).slice(), pin_url: raw.pin_url || null, source: raw.source || null };
+      var post = { urls: (raw.urls || []).slice(), pin_url: raw.pin_url || null, source: raw.source || null, width: raw.width || 0, height: raw.height || 0 };
       if (!post.urls.length) return;
       var k = canonicalKeyFromPinimgUrl(post.urls[0]);
       if (!k || seenPostKeys.has(k)) return;
@@ -2242,7 +2249,7 @@
             // Off home tab: accumulate into homeSavedPosts without touching the DOM
             var added = 0;
             next.forEach(function (raw) {
-              var post = { urls: (raw.urls || []).slice(), pin_url: raw.pin_url || null };
+              var post = { urls: (raw.urls || []).slice(), pin_url: raw.pin_url || null, width: raw.width || 0, height: raw.height || 0 };
               if (!post.urls.length) return;
               var k = canonicalKeyFromPinimgUrl(post.urls[0]);
               if (!k || homeSavedKeys.has(k)) return;
@@ -2968,20 +2975,29 @@
       fetch("/api/export")
         .then(function (res) {
           if (!res.ok) throw new Error("Export failed");
-          return res.blob();
+          return res.text();
         })
-        .then(function (blob) {
-          var url = URL.createObjectURL(blob);
+        .then(function (text) {
+          // In pywebview, use the native save dialog — a.click() downloads are silently dropped.
+          if (window.pywebview && window.pywebview.api && window.pywebview.api.save_file) {
+            return window.pywebview.api.save_file(text, "japw_backup.json")
+              .then(function (path) {
+                if (path) showToast("\u2713 Backup saved");
+              });
+          }
+          // Plain browser fallback
+          var blob = new Blob([text], { type: "application/json" });
+          var blobUrl = URL.createObjectURL(blob);
           var a = document.createElement("a");
-          a.href = url;
+          a.href = blobUrl;
           a.download = "japw_backup.json";
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-          showToast("Backup exported");
+          URL.revokeObjectURL(blobUrl);
+          showToast("\u2713 Backup exported");
         })
-        .catch(function () { showToast("Export failed"); })
+        .catch(function () { showToast("\u2717 Export failed"); })
         .finally(function () { exportBtn.disabled = false; });
     });
   }

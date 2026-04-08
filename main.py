@@ -21,6 +21,20 @@ class Api:
             return result[0]
         return None
 
+    def save_file(self, content: str, filename: str) -> str | None:
+        result = self._window.create_file_dialog(
+            webview.SAVE_DIALOG,
+            directory=os.path.expanduser("~"),
+            save_filename=filename,
+            file_types=("JSON files (*.json)", "All files (*.*)")
+        )
+        if not result:
+            return None
+        path = result[0] if isinstance(result, (list, tuple)) else str(result)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return path
+
 
 def start_flask(app, port: int) -> None:
     app.run(host="127.0.0.1", port=port, threaded=True, use_reloader=False)
@@ -55,6 +69,7 @@ def main() -> None:
 
     api = Api(window)
     window.expose(api.pick_folder)
+    window.expose(api.save_file)
 
     webview.start()
 
