@@ -82,8 +82,8 @@ _home_buf_keys: set[str] = set()          # keys currently in buffer
 _home_buf_served_keys: set[str] = set()   # keys already popped and sent to the UI
 _home_buf_fill_active = False
 _home_api_bookmark: str | None = None     # API pagination cursor
-_HOME_BUF_LOW = 25       # start a refill when buffer drops below this
-_HOME_BUF_TARGET = 90    # target size after each fill
+_HOME_BUF_LOW = 50       # start a refill when buffer drops below this
+_HOME_BUF_TARGET = 150   # target size after each fill
 
 
 def _home_buf_key(post: dict) -> str:
@@ -126,7 +126,7 @@ def _home_buf_fill_worker() -> None:
                 pages_tried = 0
                 bm = bookmark
                 while len(local_collected) < need and pages_tried < 12:
-                    page_posts, next_bm = _api_homefeed_page(page, bm, page_size=25)
+                    page_posts, next_bm = _api_homefeed_page(page, bm, page_size=50)
                     pages_tried += 1
                     bm = next_bm
                     if not page_posts:
@@ -832,6 +832,7 @@ def _api_homefeed_page(
         "in_nux": False,
         "in_news_hub": False,
         "static_feed": False,
+        "page_size": page_size,
     }
     if bookmark:
         opts["bookmarks"] = [bookmark]
@@ -2770,7 +2771,7 @@ def fetch_home_image_urls(
                 seen_k: set[str] = set()
                 bm: str | None = None
                 while len(local_collected) < 60:
-                    page_posts, bm = _api_homefeed_page(bpage, bm, page_size=25)
+                    page_posts, bm = _api_homefeed_page(bpage, bm, page_size=50)
                     if not page_posts:
                         break
                     for p in page_posts:

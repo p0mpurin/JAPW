@@ -85,6 +85,12 @@
   var xSessionStatus = document.getElementById("x-session-status");
   var xSyncBtn = document.getElementById("x-sync-btn");
   var xDisconnectBtn = document.getElementById("x-disconnect-btn");
+  var homeRefreshBtn = document.getElementById("home-refresh-btn");
+  var gridZoomOut = document.getElementById("grid-zoom-out");
+  var gridZoomIn = document.getElementById("grid-zoom-in");
+  var gridZoomControls = document.getElementById("grid-zoom-controls");
+  var modalSlideCounter = document.getElementById("modal-slide-counter");
+  var modalDots = document.getElementById("modal-dots");
 
   var currentImageUrl = "";
   var feedPosts = [];
@@ -93,6 +99,16 @@
   var modalPostIndex = -1;
   var modalSourcePost = null;
   var modalRelatedReqId = 0;
+  // Modal zoom / pan state
+  var modalZoom = 1;
+  var modalPanX = 0;
+  var modalPanY = 0;
+  // Modal drag state (swipe nav + zoom pan)
+  var _modalDragStartX = 0;
+  var _modalDragStartY = 0;
+  var _modalDragMode = null; // "pan" | "swipe" | null
+  var _modalPanStartX = 0;
+  var _modalPanStartY = 0;
   var currentTab = "home";
   var loginPollTimer = null;
   var splashPending = true;
@@ -412,6 +428,12 @@
     if (searchRow) searchRow.classList.toggle("hidden", !isSearch);
     if (topbarSpacer) topbarSpacer.classList.toggle("hidden", isSearch);
 
+    // Show home refresh button only on home tab
+    if (homeRefreshBtn) {
+      homeRefreshBtn.classList.toggle("hidden", tab !== "home");
+      if (tab !== "home") homeRefreshBtn.classList.remove("refreshing");
+    }
+
     var isCollectionsRoot = tab === "collections" && !currentCollectionId;
     if (collectionsView) collectionsView.classList.toggle("hidden", !isCollectionsRoot);
     gallery.classList.toggle("hidden", isCollectionsRoot);
@@ -485,9 +507,9 @@
               "Your Pinterest session has expired. Sync again to restore your feed."
             );
           } else {
-            showEmpty(
-              "Sync from your browser",
-              "Open Settings → Sync from browser (imports the Pinterest session from Chrome, Edge, or Firefox on this PC)."
+            showEmptyWithSync(
+              "Connect Pinterest",
+              "Sync your browser session to load your personalized home feed. Works with Chrome, Edge, Firefox, and others."
             );
           }
           return;
@@ -525,14 +547,24 @@
       .finally(function () {
         if (epoch !== feedEpoch) return;
         loading.classList.add("hidden");
+        if (homeRefreshBtn) homeRefreshBtn.classList.remove("refreshing");
         finishSplash();
         scheduleScrollPrefetchCheck();
       });
   }
 
+  if (homeRefreshBtn) {
+    homeRefreshBtn.addEventListener("click", function () {
+      homeRefreshBtn.classList.add("refreshing");
+      showToast("Refreshing home...");
+      loadHome(true);
+    });
+  }
+
   if (tabHome) {
     tabHome.addEventListener("click", function () {
       if (currentTab === "home") {
+        if (homeRefreshBtn) homeRefreshBtn.classList.add("refreshing");
         showToast("Refreshing home...");
         loadHome(true);
         return;
@@ -943,10 +975,39 @@
         if (posts.length > 0) {
           renderXPosts();
         } else if (!data.refreshing) {
-          var hint = data.has_session === false
-            ? "Log in to X/Twitter in your browser first, then try again."
-            : "No images found. The account may be private or have no media.";
-          showEmpty("No posts found", hint);
+          if (data.has_session === false) {
+            showEmpty("Connect X / Twitter", "Sync your X session to browse artist media. Close your browser first if the cookie file is locked.");
+            if (!emptyState.querySelector(".empty-sync-btn")) {
+              var xSyncEmptyBtn = document.createElement("button");
+              xSyncEmptyBtn.className = "empty-sync-btn";
+              xSyncEmptyBtn.textContent = "Sync X session";
+              xSyncEmptyBtn.addEventListener("click", function () {
+                xSyncEmptyBtn.disabled = true;
+                xSyncEmptyBtn.textContent = "Syncing\u2026";
+                fetch("/x/auth/sync", { method: "POST" })
+                  .then(function (r) { return r.json(); })
+                  .then(function (data) {
+                    if (data.error) {
+                      showToast("\u2717 " + data.error);
+                      xSyncEmptyBtn.disabled = false;
+                      xSyncEmptyBtn.textContent = "Sync X session";
+                    } else {
+                      showToast("\u2713 X session synced");
+                      refreshXSessionStatus();
+                      loadXTab();
+                    }
+                  })
+                  .catch(function () {
+                    showToast("\u2717 Sync failed");
+                    xSyncEmptyBtn.disabled = false;
+                    xSyncEmptyBtn.textContent = "Sync X session";
+                  });
+              });
+              emptyState.appendChild(xSyncEmptyBtn);
+            }
+          } else {
+            showEmpty("No posts found", "No images found. The account may be private or have no media.");
+          }
         }
 
         // If backend is scraping in background, poll until done then refresh display
@@ -1599,7 +1660,35 @@
 
   // ─── Gallery ───
   var galleryCols = [];
-  var colCount = 4;
+  var colCount = Math.max(2, Math.min(8, parseInt(localStorage.getItem("gridZoom") || "4", 10) || 4));
+
+  function updateGridZoomBtnStates() {
+    if (gridZoomOut) gridZoomOut.disabled = colCount >= 8;
+    if (gridZoomIn) gridZoomIn.disabled = colCount <= 2;
+    if (gridZoomOut) gridZoomOut.style.opacity = colCount >= 8 ? "0.35" : "";
+    if (gridZoomIn) gridZoomIn.style.opacity = colCount <= 2 ? "0.35" : "";
+  }
+
+  function setColCount(n) {
+    colCount = Math.max(2, Math.min(8, n));
+    localStorage.setItem("gridZoom", String(colCount));
+    updateGridZoomBtnStates();
+    // Re-render current feed with new column count
+    var posts = feedPosts.slice();
+    if (posts.length > 0) {
+      renderPosts(posts);
+    }
+  }
+
+  if (gridZoomOut) {
+    gridZoomOut.addEventListener("click", function () { setColCount(colCount + 1); });
+  }
+  if (gridZoomIn) {
+    gridZoomIn.addEventListener("click", function () { setColCount(colCount - 1); });
+  }
+  updateGridZoomBtnStates();
+  // Apply density class for initial colCount (in case user saved a high count)
+  if (colCount >= 6) gallery.classList.add("cols-" + colCount);
 
   function normalizePostsPayload(data) {
     if (!data) return [];
@@ -1646,10 +1735,12 @@
   }
 
   function thumbnailUrl(url) {
-    // Swap any pinimg size bucket (or originals) to 474x for fast grid display.
+    // Use smaller thumbnails when cards are rendered small (many columns).
+    // 236x loads ~2× faster than 474x and is plenty for small cards.
+    var bucket = colCount >= 5 ? "236x" : "474x";
     return (url || "").replace(
       /i\.pinimg\.com\/(?:originals|\d+x(?:\d+)?)\//i,
-      "i.pinimg.com/474x/"
+      "i.pinimg.com/" + bucket + "/"
     );
   }
 
@@ -1788,6 +1879,10 @@
     });
     galleryCols = [];
 
+    // Apply density class so CSS can tighten gap/padding at high col counts
+    gallery.className = gallery.className.replace(/\bcols-\d+\b/g, "").trim();
+    if (colCount >= 6) gallery.classList.add("cols-" + colCount);
+
     var sentinel = infiniteSentinel;
     for (var i = 0; i < colCount; i++) {
         var col = document.createElement("div");
@@ -1916,6 +2011,8 @@
       item.appendChild(gifBadge);
     }
 
+    var cardSlideIndex = 0;
+
     if (urls.length > 1) {
       var badge = document.createElement("span");
       badge.className = "gallery-item-badge";
@@ -1929,6 +2026,57 @@
       badge.appendChild(stack);
       badge.appendChild(numEl);
       item.appendChild(badge);
+    }
+
+    // Card-level multi-image navigation (dots + prev/next arrows)
+    if (urls.length > 1 && !gifVideoUrl) {
+      var cardDotCount = Math.min(urls.length, 15);
+      var cardDotsEl = document.createElement("div");
+      cardDotsEl.className = "card-dots";
+      for (var _d = 0; _d < cardDotCount; _d++) {
+        var _dot = document.createElement("span");
+        _dot.className = "card-dot" + (_d === 0 ? " active" : "");
+        cardDotsEl.appendChild(_dot);
+      }
+      item.appendChild(cardDotsEl);
+
+      var cardPrevBtn = document.createElement("button");
+      cardPrevBtn.type = "button";
+      cardPrevBtn.className = "card-nav-btn card-nav-prev";
+      cardPrevBtn.setAttribute("aria-label", "Previous image");
+      cardPrevBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>';
+
+      var cardNextBtn = document.createElement("button");
+      cardNextBtn.type = "button";
+      cardNextBtn.className = "card-nav-btn card-nav-next";
+      cardNextBtn.setAttribute("aria-label", "Next image");
+      cardNextBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>';
+
+      var _updateCardNavState = function () {
+        var atStart = cardSlideIndex <= 0;
+        var atEnd = cardSlideIndex >= urls.length - 1;
+        cardPrevBtn.style.opacity = atStart ? "0" : "";
+        cardPrevBtn.style.pointerEvents = atStart ? "none" : "";
+        cardNextBtn.style.opacity = atEnd ? "0" : "";
+        cardNextBtn.style.pointerEvents = atEnd ? "none" : "";
+        var dots = cardDotsEl.querySelectorAll(".card-dot");
+        dots.forEach(function (d, i) { d.classList.toggle("active", i === cardSlideIndex); });
+      };
+
+      var _navigateCard = function (dir) {
+        var newIdx = cardSlideIndex + dir;
+        if (newIdx < 0 || newIdx >= urls.length) return;
+        cardSlideIndex = newIdx;
+        if (img) img.src = thumbnailUrl(urls[cardSlideIndex]);
+        _updateCardNavState();
+      };
+
+      cardPrevBtn.addEventListener("click", function (e) { e.stopPropagation(); _navigateCard(-1); });
+      cardNextBtn.addEventListener("click", function (e) { e.stopPropagation(); _navigateCard(1); });
+
+      item.appendChild(cardPrevBtn);
+      item.appendChild(cardNextBtn);
+      _updateCardNavState();
     }
 
     // Overlay
@@ -1982,7 +2130,7 @@
     leftActs.appendChild(openBtn);
     leftActs.appendChild(colBtn);
 
-    // Right action: download
+    // Download — grouped with the other actions
     var dlBtn = document.createElement("button");
     dlBtn.className = "download-btn";
     dlBtn.setAttribute("aria-label", "Download cover image");
@@ -1991,9 +2139,9 @@
       e.stopPropagation();
       downloadImage(downloadUrl);
     });
+    leftActs.appendChild(dlBtn);
 
     overlayBottom.appendChild(leftActs);
-    overlayBottom.appendChild(dlBtn);
     overlay.appendChild(overlayBottom);
     item.appendChild(overlay);
     item.appendChild(meta);
@@ -2003,18 +2151,18 @@
         togglePostSelect(postKey, item);
         return;
       }
-      openModalForPostByKey(postKey);
+      openModalForPostByKey(postKey, cardSlideIndex);
     });
 
     if (lazyImageObserver) lazyImageObserver.observe(item);
     return item;
   }
 
-  function openModalForPostByKey(postKey) {
+  function openModalForPostByKey(postKey, startSlide) {
     for (var i = 0; i < feedPosts.length; i++) {
       var u = feedPosts[i].urls && feedPosts[i].urls[0];
       if (u && canonicalKeyFromPinimgUrl(u) === postKey) {
-        openModalForPost(i);
+        openModalForPost(i, startSlide || 0);
         return;
       }
     }
@@ -2212,6 +2360,61 @@
     }, 250);
   }
 
+  // ─── Modal dots ───
+  function updateModalDots() {
+    if (!modalDots) return;
+    var n = modalSlideshowUrls.length;
+    if (n < 2) { modalDots.classList.add("hidden"); return; }
+    modalDots.innerHTML = "";
+    modalDots.classList.remove("hidden");
+    var cap = Math.min(n, 20);
+    for (var i = 0; i < cap; i++) {
+      var dot = document.createElement("button");
+      dot.type = "button";
+      dot.className = "modal-dot" + (i === modalSlideIndex ? " active" : "");
+      dot.setAttribute("aria-label", "Image " + (i + 1));
+      (function (idx) {
+        dot.addEventListener("click", function () { jumpModalToIndex(idx); });
+      })(i);
+      modalDots.appendChild(dot);
+    }
+  }
+
+  function jumpModalToIndex(index) {
+    if (index < 0 || index >= modalSlideshowUrls.length || index === modalSlideIndex) return;
+    modalSlideIndex = index;
+    currentImageUrl = modalSlideshowUrls[modalSlideIndex];
+    resetModalZoom();
+    modalImg.style.opacity = "0";
+    setTimeout(function () {
+      modalImg.src = currentImageUrl;
+      modalImg.onload = function () { modalImg.style.opacity = "1"; };
+    }, 150);
+    updateNavButtons();
+    updateModalSlideshowHint();
+  }
+
+  // ─── Modal zoom helpers ───
+  function applyModalZoom() {
+    var el = modalImg;
+    if (!el || el.style.display === "none") return;
+    var tx = modalPanX / modalZoom;
+    var ty = modalPanY / modalZoom;
+    el.style.transform = "scale(" + modalZoom + ") translate(" + tx + "px, " + ty + "px)";
+    el.classList.toggle("is-zoomed", modalZoom > 1);
+    el.classList.toggle("zoomable", true);
+  }
+
+  function resetModalZoom() {
+    modalZoom = 1;
+    modalPanX = 0;
+    modalPanY = 0;
+    if (modalImg) {
+      modalImg.style.transform = "";
+      modalImg.classList.remove("is-zoomed", "is-dragging");
+    }
+  }
+
   // ─── Modal (one Pinterest pin; arrows step through that pin's images) ───
   function updateModalDownloadAllVisibility() {
     if (!modalDownloadAll) return;
@@ -2221,9 +2424,10 @@
   function updateModalSlideshowHint() {
     if (!modalSlideshowHint) return;
     var n = modalSlideshowUrls.length;
-    if (n > 1) {
+    // Only show the text hint when there are too many images for dots (> 20)
+    if (n > 20) {
       modalSlideshowHint.classList.remove("hidden");
-      modalSlideshowHint.textContent = n + " photos in this pin. Use side arrows or keyboard \u2190 \u2192.";
+      modalSlideshowHint.textContent = n + " photos \u2014 use arrows or keyboard \u2190 \u2192.";
     } else {
       modalSlideshowHint.classList.add("hidden");
       modalSlideshowHint.textContent = "";
@@ -2256,15 +2460,18 @@
     posts.forEach(function (raw) {
       var urls = raw.urls || [];
       if (!urls.length) return;
-      var thumb = document.createElement("button");
-      thumb.type = "button";
+      var thumb = document.createElement("div");
       thumb.className = "modal-related-thumb";
+      thumb.setAttribute("role", "button");
+      thumb.setAttribute("tabindex", "0");
       thumb.setAttribute("aria-label", "Open similar pin");
+
+      var relSlideIndex = 0;
+
       var im = document.createElement("img");
       im.alt = "";
       im.decoding = "async";
       im.onerror = function () {
-        // Thumbnail failed — try the next URL variant if available
         var tried = parseInt(im.getAttribute("data-url-idx") || "0", 10);
         tried += 1;
         if (tried < urls.length) {
@@ -2276,10 +2483,69 @@
       };
       im.src = thumbnailUrl(urls[0]);
       thumb.appendChild(im);
+
+      // Multi-image nav for related thumbs
+      if (urls.length > 1) {
+        var relDotCount = Math.min(urls.length, 10);
+        var relDotsEl = document.createElement("div");
+        relDotsEl.className = "rel-thumb-dots";
+        for (var _rd = 0; _rd < relDotCount; _rd++) {
+          var _rdot = document.createElement("span");
+          _rdot.className = "rel-thumb-dot" + (_rd === 0 ? " active" : "");
+          relDotsEl.appendChild(_rdot);
+        }
+        thumb.appendChild(relDotsEl);
+
+        var relPrev = document.createElement("button");
+        relPrev.type = "button";
+        relPrev.className = "rel-thumb-nav rel-thumb-nav-prev";
+        relPrev.setAttribute("aria-label", "Previous image");
+        relPrev.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>';
+
+        var relNext = document.createElement("button");
+        relNext.type = "button";
+        relNext.className = "rel-thumb-nav rel-thumb-nav-next";
+        relNext.setAttribute("aria-label", "Next image");
+        relNext.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>';
+
+        var _updateRelNav = function () {
+          relPrev.style.opacity = relSlideIndex <= 0 ? "0" : "";
+          relPrev.style.pointerEvents = relSlideIndex <= 0 ? "none" : "";
+          relNext.style.opacity = relSlideIndex >= urls.length - 1 ? "0" : "";
+          relNext.style.pointerEvents = relSlideIndex >= urls.length - 1 ? "none" : "";
+          relDotsEl.querySelectorAll(".rel-thumb-dot").forEach(function (d, i) {
+            d.classList.toggle("active", i === relSlideIndex);
+          });
+        };
+
+        relPrev.addEventListener("click", function (e) {
+          e.stopPropagation();
+          if (relSlideIndex <= 0) return;
+          relSlideIndex--;
+          im.src = thumbnailUrl(urls[relSlideIndex]);
+          _updateRelNav();
+        });
+
+        relNext.addEventListener("click", function (e) {
+          e.stopPropagation();
+          if (relSlideIndex >= urls.length - 1) return;
+          relSlideIndex++;
+          im.src = thumbnailUrl(urls[relSlideIndex]);
+          _updateRelNav();
+        });
+
+        thumb.appendChild(relPrev);
+        thumb.appendChild(relNext);
+        _updateRelNav();
+      }
+
       var postCopy = { urls: urls.slice(), pin_url: raw.pin_url || null };
       thumb.addEventListener("click", function (e) {
         e.stopPropagation();
-        openModalForSimilarPost(postCopy);
+        openModalForSimilarPost(postCopy, relSlideIndex);
+      });
+      thumb.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openModalForSimilarPost(postCopy, relSlideIndex); }
       });
       track.appendChild(thumb);
     });
@@ -2364,12 +2630,12 @@
     if (modalStage) { modalStage.style.transform = ""; modalStage.style.opacity = ""; }
   }
 
-  function openModalForSimilarPost(post) {
+  function openModalForSimilarPost(post, startSlide) {
     if (!post || !post.urls || !post.urls.length) return;
     modalPostIndex = -1;
     modalSourcePost = { urls: post.urls.slice(), pin_url: post.pin_url || null };
     modalSlideshowUrls = modalSourcePost.urls.slice();
-    modalSlideIndex = 0;
+    modalSlideIndex = (startSlide > 0 && startSlide < modalSlideshowUrls.length) ? startSlide : 0;
     currentImageUrl = modalSlideshowUrls[modalSlideIndex];
     _setModalMedia(post, currentImageUrl);
     _resetModalScroll();
@@ -2395,13 +2661,13 @@
     }
   }
 
-  function openModalForPost(postIndex) {
+  function openModalForPost(postIndex, startSlide) {
     var post = feedPosts[postIndex];
     if (!post || !post.urls || !post.urls.length) return;
     modalPostIndex = postIndex;
     modalSourcePost = { urls: post.urls.slice(), pin_url: post.pin_url || null, gif_video_url: post.gif_video_url || null };
     modalSlideshowUrls = post.urls.slice();
-    modalSlideIndex = 0;
+    modalSlideIndex = (startSlide > 0 && startSlide < modalSlideshowUrls.length) ? startSlide : 0;
     currentImageUrl = modalSlideshowUrls[modalSlideIndex];
     _setModalMedia(post, currentImageUrl);
     _resetModalScroll();
@@ -2417,10 +2683,14 @@
     modalRelatedReqId += 1;
     clearModalRelated();
     modalSourcePost = null;
+    resetModalZoom();
+    _modalDragMode = null;
     if (modalSlideshowHint) {
       modalSlideshowHint.classList.add("hidden");
       modalSlideshowHint.textContent = "";
     }
+    if (modalSlideCounter) modalSlideCounter.classList.add("hidden");
+    if (modalDots) { modalDots.innerHTML = ""; modalDots.classList.add("hidden"); }
     modal.classList.remove("active");
     document.body.style.overflow = "";
     if (modalDownloadAll) modalDownloadAll.classList.add("hidden");
@@ -2441,6 +2711,7 @@
     if (newIndex < 0 || newIndex >= modalSlideshowUrls.length) return;
     modalSlideIndex = newIndex;
     currentImageUrl = modalSlideshowUrls[modalSlideIndex];
+    resetModalZoom();
     modalImg.style.opacity = "0";
     setTimeout(function () {
       modalImg.src = currentImageUrl;
@@ -2456,10 +2727,104 @@
     var n = modalSlideshowUrls.length;
     if (modalPrev) modalPrev.style.display = n < 2 || modalSlideIndex <= 0 ? "none" : "";
     if (modalNext) modalNext.style.display = n < 2 || modalSlideIndex >= n - 1 ? "none" : "";
+    if (modalSlideCounter) {
+      if (n > 1) {
+        modalSlideCounter.textContent = (modalSlideIndex + 1) + " / " + n;
+        modalSlideCounter.classList.remove("hidden");
+      } else {
+        modalSlideCounter.classList.add("hidden");
+      }
+    }
+    updateModalDots();
   }
 
   modalClose.addEventListener("click", closeModal);
   modalBackdrop.addEventListener("click", closeModal);
+
+  // ─── Modal zoom (scroll wheel) ───
+  if (modalStage) {
+    modalStage.addEventListener("wheel", function (e) {
+      if (!modal.classList.contains("active")) return;
+      e.preventDefault();
+      var delta = e.deltaY < 0 ? 0.18 : -0.18;
+      modalZoom = Math.max(1, Math.min(5, modalZoom + delta));
+      if (modalZoom === 1) { modalPanX = 0; modalPanY = 0; }
+      applyModalZoom();
+    }, { passive: false });
+
+    // Double-click: zoom in (or reset if already zoomed)
+    modalStage.addEventListener("dblclick", function (e) {
+      if (e.target === modalImg) {
+        if (modalZoom > 1) {
+          resetModalZoom();
+        } else {
+          modalZoom = 2.5;
+          applyModalZoom();
+        }
+      }
+    });
+
+    // Mousedown: start pan (when zoomed) or swipe nav (when not zoomed)
+    modalStage.addEventListener("mousedown", function (e) {
+      if (e.button !== 0) return;
+      if (e.target === modalImg || e.target === modalVideo) {
+        e.preventDefault();
+        _modalDragStartX = e.clientX;
+        _modalDragStartY = e.clientY;
+        _modalDragMode = modalZoom > 1 ? "pan" : "swipe";
+        _modalPanStartX = modalPanX;
+        _modalPanStartY = modalPanY;
+        if (_modalDragMode === "pan" && modalImg) {
+          modalImg.classList.add("is-dragging");
+        }
+      }
+    });
+  }
+
+  // Touch swipe in modal for multi-image navigation
+  var _touchSwipeStartX = 0;
+  var _touchSwipeStartY = 0;
+  if (modalStage) {
+    modalStage.addEventListener("touchstart", function (e) {
+      if (e.touches.length !== 1) return;
+      _touchSwipeStartX = e.touches[0].clientX;
+      _touchSwipeStartY = e.touches[0].clientY;
+    }, { passive: true });
+
+    modalStage.addEventListener("touchend", function (e) {
+      if (modalSlideshowUrls.length < 2 || modalZoom > 1) return;
+      var dx = e.changedTouches[0].clientX - _touchSwipeStartX;
+      var dy = e.changedTouches[0].clientY - _touchSwipeStartY;
+      if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 50) {
+        navigateModal(dx < 0 ? 1 : -1);
+      }
+    }, { passive: true });
+  }
+
+  // Global mousemove/mouseup for pan and swipe
+  document.addEventListener("mousemove", function (e) {
+    if (!_modalDragMode) return;
+    var dx = e.clientX - _modalDragStartX;
+    var dy = e.clientY - _modalDragStartY;
+    if (_modalDragMode === "pan") {
+      modalPanX = _modalPanStartX + dx;
+      modalPanY = _modalPanStartY + dy;
+      applyModalZoom();
+    }
+  });
+
+  document.addEventListener("mouseup", function (e) {
+    if (!_modalDragMode) return;
+    var dx = e.clientX - _modalDragStartX;
+    var dy = e.clientY - _modalDragStartY;
+    if (_modalDragMode === "swipe" && modalSlideshowUrls.length > 1) {
+      if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 50) {
+        navigateModal(dx < 0 ? 1 : -1);
+      }
+    }
+    if (modalImg) modalImg.classList.remove("is-dragging");
+    _modalDragMode = null;
+  });
 
   // Shrink + fade the main image as the user scrolls down toward similar pins.
   // The stage scrolls naturally (no sticky); the transform just adds a gentle

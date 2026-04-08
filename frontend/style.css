@@ -344,12 +344,17 @@ body.splash-active {
   align-items: flex-start;
 }
 
+/* Tighten gap when many columns are shown */
+.gallery.cols-6  { gap: 12px; padding: 16px; }
+.gallery.cols-7  { gap: 10px; padding: 14px; }
+.gallery.cols-8  { gap: 8px;  padding: 12px; }
+
 .gallery-col {
   flex: 1 1 0;
   display: flex;
   flex-direction: column;
   gap: 16px;
-  min-width: 200px;
+  min-width: 120px;
   contain: layout style;
 }
 
@@ -717,6 +722,46 @@ body.splash-active {
   border-radius: var(--radius-lg);
   object-fit: contain;
   box-shadow: 0 32px 80px rgba(0, 0, 0, 0.6);
+  transform-origin: center center;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.modal-slide-counter {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 4;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.modal-slide-counter.hidden {
+  display: none !important;
+}
+
+.modal-stage img.zoomable {
+  cursor: zoom-in;
+  transform-origin: center center;
+  transition: transform 0.15s ease;
+}
+
+.modal-stage img.is-zoomed {
+  cursor: grab;
+}
+
+.modal-stage img.is-dragging {
+  cursor: grabbing;
+  transition: none;
 }
 
 .modal-slideshow-hint {
@@ -742,6 +787,42 @@ body.splash-active {
 
 .modal-slideshow-hint.hidden {
   display: none !important;
+}
+
+/* ─── Modal image dots ─── */
+.modal-dots {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 24px 4px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.modal-dots.hidden {
+  display: none !important;
+}
+
+.modal-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background var(--transition), transform var(--transition);
+}
+
+.modal-dot:hover {
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.modal-dot.active {
+  background: #fff;
+  transform: scale(1.3);
 }
 
 .modal-related {
@@ -782,6 +863,7 @@ body.splash-active {
   transition: transform var(--transition), box-shadow var(--transition), opacity var(--transition);
   display: block;
   width: 100%;
+  position: relative;
 }
 
 .modal-related-thumb:hover {
@@ -795,6 +877,74 @@ body.splash-active {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+/* Related thumb multi-image nav */
+.rel-thumb-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 4;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--transition), background var(--transition);
+}
+
+.modal-related-thumb:hover .rel-thumb-nav {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.rel-thumb-nav-prev { left: 5px; }
+.rel-thumb-nav-next { right: 5px; }
+
+.rel-thumb-nav:hover {
+  background: rgba(0, 0, 0, 0.8);
+}
+
+.rel-thumb-dots {
+  position: absolute;
+  bottom: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 4;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  pointer-events: none;
+  max-width: 80%;
+  overflow: hidden;
+  transition: opacity var(--transition);
+}
+
+.modal-related-thumb:hover .rel-thumb-dots {
+  opacity: 0;
+}
+
+.rel-thumb-dot {
+  flex-shrink: 0;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.4);
+  transition: background var(--transition-fast), transform var(--transition-fast);
+}
+
+.rel-thumb-dot.active {
+  background: #fff;
+  transform: scale(1.4);
 }
 
 .modal-related-loading {
@@ -868,10 +1018,10 @@ body.splash-active {
   position: absolute;
   top: 50%;
   transform: translateY(-50%);
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(0, 0, 0, 0.45);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 50%;
   color: #fff;
   width: 42px;
@@ -882,24 +1032,26 @@ body.splash-active {
   cursor: pointer;
   transition: all var(--transition);
   opacity: 0;
+  z-index: 4;
 }
 
 .modal.active .modal-nav-btn {
-  opacity: 0.6;
+  opacity: 0.85;
 }
 
 .modal-nav-btn:hover {
   opacity: 1 !important;
-  background: rgba(255, 255, 255, 0.1);
-  border-color: rgba(255, 255, 255, 0.15);
+  background: rgba(0, 0, 0, 0.7);
+  border-color: rgba(255, 255, 255, 0.25);
+  transform: translateY(-50%) scale(1.08);
 }
 
 .modal-nav-btn.prev {
-  left: -56px;
+  left: 14px;
 }
 
 .modal-nav-btn.next {
-  right: -56px;
+  right: 14px;
 }
 
 .modal-download-all-btn {
@@ -1688,7 +1840,7 @@ body.splash-active {
 
 .overlay-bottom {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: flex-end;
 }
 
@@ -1759,6 +1911,98 @@ body.splash-active {
   background: rgba(255, 255, 255, 0.06);
   z-index: 4;
   pointer-events: none;
+}
+
+/* ─── Card multi-image navigation ─── */
+.card-nav-btn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 5;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--transition), background var(--transition);
+}
+
+.gallery-item:hover .card-nav-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.card-nav-prev { left: 8px; }
+.card-nav-next { right: 8px; }
+
+.card-nav-btn:hover {
+  background: rgba(0, 0, 0, 0.8);
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.card-nav-btn[style*="opacity: 0"],
+.card-nav-btn[style*="opacity:0"] {
+  pointer-events: none !important;
+}
+
+.card-dots {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  pointer-events: none;
+  max-width: 80%;
+  overflow: hidden;
+  transition: opacity var(--transition);
+}
+
+/* Hide dots when hovering — nav arrows + action buttons take over */
+.gallery-item:hover .card-dots {
+  opacity: 0;
+}
+
+.card-dot {
+  flex-shrink: 0;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.35);
+  transition: background var(--transition-fast), transform var(--transition-fast);
+}
+
+.card-dot.active {
+  background: #fff;
+  transform: scale(1.4);
+}
+
+/* ─── Grid zoom controls ─── */
+.grid-zoom-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+/* ─── Home refresh spin animation ─── */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+#home-refresh-btn.refreshing svg {
+  animation: spin 0.7s linear infinite;
 }
 
 /* Select mode button in topbar */
