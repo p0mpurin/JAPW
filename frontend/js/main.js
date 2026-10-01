@@ -11,6 +11,7 @@ import { runSearch, searchHistory } from "./feeds/search.js";
 import { loadLikedKeys } from "./feeds/library.js";
 import "./feeds/artists.js";
 import "./feeds/boards.js";
+import "./feeds/visual.js";
 import "./viewer.js";
 import "./colorbar.js";
 
@@ -29,7 +30,7 @@ async function boot() {
   const tab = lastTab();
   const recent = searchHistory()[0];
   if (tab === "search" && recent) runSearch(recent);
-  else setTab(tab === "search" ? "home" : tab);
+  else setTab(tab === "search" || tab === "visual" ? "home" : tab);
 }
 
 boot();

@@ -3,8 +3,8 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 
 echo ========================================
-echo   JAPW desktop build  (PyInstaller one-file)
-echo   Output: dist\JAPW.exe
+echo   JAPW desktop build  (PyInstaller one-folder)
+echo   Output: dist\JAPW\JAPW.exe
 echo ========================================
 echo.
 
@@ -50,7 +50,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
-echo [3/3] PyInstaller  JAPW.spec  --onefile  --windowed
+echo [3/3] PyInstaller  JAPW.spec  (one-folder, windowed)
 "%PYTHON_CMD%" -m PyInstaller --noconfirm JAPW.spec
 if %ERRORLEVEL% NEQ 0 (
     echo [ERROR] PyInstaller failed.
@@ -59,6 +59,6 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
-echo Done: dist\JAPW.exe
+echo Done: dist\JAPW\JAPW.exe  (ship the whole dist\JAPW folder)
 echo.
 pause

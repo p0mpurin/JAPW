@@ -7,7 +7,8 @@ import { canonicalKey, toPost } from "./core/pins.js";
 import { colorBucket, SWATCHES } from "./core/colors.js";
 import { actions } from "./actions.js";
 import { findPost, setColorFilter, selectAllVisible, toggleSelectMode } from "./gallery.js";
-import { viewerOpen, viewerTarget, openViewer, scrollToRelated } from "./viewer.js";
+import { viewerOpen, viewerTarget, openViewer, scrollToRelated, closeViewer } from "./viewer.js";
+import { searchByPost } from "./feeds/visual.js";
 import { currentCollection, removeFromCurrentCollection } from "./feeds/library.js";
 import { downloadMany } from "./downloads.js";
 import { syncColorButton } from "./colorbar.js";
@@ -52,6 +53,10 @@ function buildItems(post, url, where) {
       scrollToRelated();
     }));
   }
+  out.push(item("Find similar images", "search", () => {
+    if (where === "viewer") closeViewer();
+    searchByPost(post, url);
+  }));
   out.push(sep());
   out.push(item(liked ? "Unlike" : "Like", "heart", () => actions.toggleLike(post), { hint: "L" }));
   out.push(item("Add to collection…", "folderPlus", () => actions.addToCollection(post), { hint: "C" }));

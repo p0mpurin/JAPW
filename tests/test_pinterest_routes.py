@@ -53,7 +53,7 @@ def test_search_uses_session_when_connected(client):
 
 
 def test_search_falls_back_to_pinscrape_when_logged_out(client):
-    with patch("japw.routes.pinterest.Pinterest") as MockPin:
+    with patch("pinscrape.Pinterest") as MockPin:
         MockPin.return_value.search.return_value = [
             "https://i.pinimg.com/236x/ab/cd/x.jpg",
             "https://i.pinimg.com/736x/ab/cd/x.jpg",
@@ -67,7 +67,7 @@ def test_search_falls_back_to_pinscrape_when_logged_out(client):
 
 def test_search_uses_pinscrape_when_setting_on(client):
     client.post("/api/settings", json={"search_use_pinscrape_when_logged_in": True})
-    with connected(), patch("japw.pinterest.search") as m_session, patch("japw.routes.pinterest.Pinterest") as MockPin:
+    with connected(), patch("japw.pinterest.search") as m_session, patch("pinscrape.Pinterest") as MockPin:
         MockPin.return_value.search.return_value = ["https://i.pinimg.com/736x/p.jpg"]
         r = client.get("/api/search?q=cats")
     assert r.get_json()["source"] == "pinscrape"

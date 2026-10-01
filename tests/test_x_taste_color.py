@@ -146,3 +146,44 @@ def test_x_routes(client):
         d = client.get("/x/media?username=SomeArtist&offset=40").get_json()
     assert d["next_offset"] == 41 and d["has_more"]
     m.assert_called_once_with("SomeArtist", 40, 40, refresh=False)
+
+
+# ─── visual search ───
+
+def _jpeg():
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (40, 30), (20, 40, 200)).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_visual_search_upload_and_paging(client):
+    from unittest.mock import MagicMock
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = {"data": [
+        {"id": "111", "image_large_url": "https://i.pinimg.com/1200x/aa/bb/one.jpg",
+         "image_large_size_pixels": {"width": 800, "height": 1000}, "dominant_color": "#2244cc"},
+        {"id": "222", "image_large_url": "https://i.pinimg.com/1200x/cc/dd/two.jpg", "promoter": {"id": 1}},
+    ]}
+    with patch("japw.visual.requests.put", return_value=resp) as put:
+        import io
+        r = client.post("/api/visual", data={"image": (io.BytesIO(_jpeg()), "x.png")},
+                        content_type="multipart/form-data")
+    assert r.status_code == 200
+    sent = put.call_args.kwargs["files"]["image"][1]
+    assert sent[:2] == b"\xff\xd8"  # re-encoded as JPEG
+    page = client.get(f"/api/visual/{r.get_json()['id']}").get_json()
+    assert page["has_more"] is False  # logged out → no related pins to continue with
+    assert page["posts"] == [{"urls": ["https://i.pinimg.com/1200x/aa/bb/one.jpg"], "width": 800, "height": 1000,
+                              "color": "#2244cc", "bucket": "blue",
+                              "pin_url": "https://www.pinterest.com/pin/111/"}]
+
+
+def test_visual_search_rejects_bad_input(client):
+    import io
+    r = client.post("/api/visual", data={"image": (io.BytesIO(b"not an image"), "x.txt")},
+                    content_type="multipart/form-data")
+    assert r.status_code == 422
+    assert client.post("/api/visual", json={"url": "http://insecure/x.jpg"}).status_code == 422
+    assert client.get("/api/visual/doesnotexist").status_code == 404

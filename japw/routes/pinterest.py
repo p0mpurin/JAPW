@@ -4,7 +4,6 @@ import threading
 import webbrowser
 
 from flask import Blueprint, jsonify, request
-from pinscrape import Pinterest
 
 import japw.pinterest as ps
 from japw.colors import BUCKETS
@@ -56,7 +55,9 @@ def for_you():
 
 
 def _search_logged_out(query: str):
-    """Public search via pinscrape (no cookies, a single page)."""
+    """Public search via pinscrape (no cookies, a single page). Imported lazily: it's slow to load."""
+    from pinscrape import Pinterest
+
     results = Pinterest().search(query, page_size=50)
     urls = ps.dedupe_pinimg_urls([str(u) for u in results])
     return [{"urls": [u]} for u in urls]
@@ -141,6 +142,45 @@ def board_pins(board_id):
     limit = int_arg("limit", 50, 1, 200)
     try:
         posts, has_more = ps.board_pins(board_id, request.args.get("url", ""), offset, limit)
+    except Exception as e:
+        return pinterest_error(e)
+    return _page(posts, offset, has_more)
+
+
+# ─── Visual search ───
+
+@bp.post("/api/visual")
+def visual_start():
+    """Start a search by image: multipart field "image", or JSON {"url": "https://…"}."""
+    from japw import visual
+
+    try:
+        if "image" in request.files:
+            data = request.files["image"].read(visual.MAX_BYTES + 1)
+            if len(data) > visual.MAX_BYTES:
+                return error("That image is too large.")
+        else:
+            url = (body().get("url") or "").strip()
+            if not url:
+                return error("Send an image file or an image URL")
+            data = visual.fetch_image(url)
+        return jsonify({"id": visual.start(data)})
+    except visual.VisualSearchError as e:
+        return error(str(e), 422)
+    except Exception as e:
+        return error(str(e), 502)
+
+
+@bp.get("/api/visual/<search_id>")
+def visual_page(search_id):
+    from japw import visual
+
+    offset = int_arg("offset", 0, 0, 5000)
+    limit = int_arg("limit", 50, 1, 200)
+    try:
+        posts, has_more = visual.page(search_id, offset, limit)
+    except visual.VisualSearchError as e:
+        return error(str(e), 404)
     except Exception as e:
         return pinterest_error(e)
     return _page(posts, offset, has_more)

@@ -37,6 +37,10 @@
     <div class="search" id="search-row">
       <svg class="search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       <input type="text" id="search-input" placeholder="Search Pinterest" autocomplete="off" spellcheck="false" aria-label="Search Pinterest">
+      <button type="button" id="visual-btn" class="search-visual" title="Search by image (or drop / paste one anywhere)" aria-label="Search by image">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+      </button>
+      <input type="file" id="visual-file-input" accept="image/*" hidden>
       <kbd class="search-kbd" aria-hidden="true">/</kbd>
       <div id="search-history-dropdown" class="search-dropdown hidden" role="listbox"></div>
     </div>
@@ -311,6 +315,14 @@
 
   <div id="toast" class="toast hidden"></div>
 
+  <div id="drop-overlay" class="drop-overlay hidden" aria-hidden="true">
+    <div class="drop-card">
+      <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+      <p class="drop-title">Drop to find similar images</p>
+      <p class="drop-sub">Any picture or image link works</p>
+    </div>
+  </div>
+
   <!-- ─── Dialogs ─── -->
   <div id="prompt-dialog" class="dialog hidden" role="dialog" aria-modal="true">
     <div class="dialog-backdrop prompt-dialog-backdrop"></div>
@@ -377,6 +389,7 @@
             <dt><kbd>-</kbd> <kbd>=</kbd></dt><dd>Smaller / bigger images</dd>
             <dt><kbd>S</kbd></dt><dd>Select mode</dd>
             <dt><kbd>,</kbd></dt><dd>Settings</dd>
+            <dt><kbd>Ctrl</kbd> <kbd>V</kbd></dt><dd>Search with a copied image (or drop one)</dd>
             <dt><kbd>?</kbd></dt><dd>This help</dd>
           </dl>
         </section>
