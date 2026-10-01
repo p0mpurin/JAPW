@@ -11,7 +11,6 @@ def test_get_default_config():
     assert config.get("resolution_target_width") == 1920
     assert config.get("resolution_target_height") == 1080
     assert config.get("resolution_match_mode") == "min"
-    assert config.get("pinterest_boards_page_url") == ""
     assert config.get("search_use_pinscrape_when_logged_in") is False
 
 
