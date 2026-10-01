@@ -11,28 +11,37 @@ This project isn’t affiliated with Pinterest or X. Use it in a way that respec
 
 ### Pinterest
 
-- **Home:** Your real personalized feed, same kind of data Pinterest uses when you’re logged in. It preloads posts in the background so paging feels snappy, and you can refresh to pull a fresh slice from the top.
-- **Search:** With a synced session, search goes through Pinterest while logged in as you. If you’re not logged in (or you turn on “use pinscrape for search while logged in”), search can use **pinscrape** instead, which doesn’t need your cookies. Home still uses your account when you’re connected.
-- **Boards:** Paste your **profile or “all boards”** URL in Settings (not a single board link). Then you can pick a board and scroll its pins forever.
-- **Opening a pin:** Big preview, carousels, and a strip of **similar pins** when you’re signed in.
-- **Ads:** Turn on “hide promoted” and sponsored-style pins get filtered out where the API gives us a clear signal (like `is_promoted` on the home feed). Other code paths use extra heuristics when scraping.
-- **AI labels:** Optional filter for stuff Pinterest marks as AI-related, when that shows up in the data.
+- **Home → For you:** JAPW learns your taste locally from what you open, like, download, copy and collect, and builds a feed of "more like this" around your strongest picks (mixed with your Pinterest feed). Nothing is sent to Pinterest; reset it any time in Settings.
+- **Home → Pinterest:** Your real personalized Pinterest feed. It starts loading the moment the app opens and always fetches the next page before you scroll to it. Refresh (or press **R**) to pull a fresh slice from the top.
+- **Search:** With a synced session, search goes through Pinterest as you. Suggestions appear as you type, and the query starts loading in the background while you type, so pressing Enter is usually instant. Re-running a recent search is instant too. When you’re not logged in (or you turn on “use pinscrape for search while logged in”), search uses **pinscrape**, which doesn’t need your cookies.
+- **Boards:** Your own boards, straight from your account. Pick one and scroll its pins.
+- **Opening a pin:** Big preview (a sharp version shows instantly, then the full original swaps in), carousels, zoom/pan, and **More like this**.
+- **Colour:** Show only pins of one colour (red, blue, black, …) or sort the grid by colour, from the palette button, a pin's right-click menu, or the colour pill in the viewer. On Home and Search the filtering happens on the server, which also runs colour-targeted searches in parallel, so a colour fills the screen in a couple of seconds.
+- **Ads:** “Hide promoted” filters sponsored pins using the flags Pinterest sends with each pin.
+- **AI labels:** Optional filter for pins Pinterest marks as AI-generated or AI-modified.
 
 ### Your library (all local)
 
 - **Liked:** Heart things and they land in `likes.json`.
 - **Collections:** Make folders of posts in `collections.json`.
-- **Downloads:** Pick a folder and save images. There’s an optional **resolution filter** so you can favor real wallpaper-sized images over tiny thumbnails when Pinterest offers several sizes.
+- **Downloads:** Pick a folder and save images; each download offers **Show in folder**, and pins you’ve already saved get a small check mark. An optional **resolution filter** favours real wallpaper-sized images.
 
 ### Artists (X)
 
-Sync X from your browser like Pinterest, add **@handles**, and browse their media on the Artists tab (filters, refresh, manage list).
+Sync X from your browser like Pinterest, add **@handles** (or paste a profile link), and browse their media on the Artists tab — one artist or everyone interleaved. Media comes straight from x.com's own API with your cookies, a page in about a second, no browser involved.
+
+### Getting around
+
+- **Right-click any pin** (in the grid, the viewer, or More like this) for every action: open, like, add to collection, download, **copy image**, copy link, open on Pinterest/X, filter by its colour.
+- **Drag an image** out of the grid into Explorer, Discord or an editor.
+- **Keyboard:** `/` or `Ctrl+K` search · `1`–`6` tabs · `R` refresh · `-` / `=` image size · `S` select · `,` settings · `?` all shortcuts. With an image hovered or open: `L` like · `D` download · `C` collect · `O` open · `Y` copy link · `←`/`→` slides.
+- The window remembers its size and position, and the app reopens on the tab you last used.
 
 ---
 
 ## How Pinterest login works
 
-JAPW never sees your password. Log in on Chrome, Edge, Firefox, or whatever you use, then hit **Settings** and **Sync from browser**. The app copies cookies into a **Playwright** storage file and uses them inside a headless Chromium for API calls. If things stop working, sync again.
+JAPW never sees your password. Log in on Chrome, Edge, Firefox, Zen or whatever you use, then hit **Settings** and **Sync from browser**. The app copies your Pinterest cookies into a local session file and calls the same JSON endpoints pinterest.com uses, directly over HTTPS — no hidden browser. If Pinterest stops accepting the session, a banner asks you to sync again.
 
 ---
 
@@ -41,24 +50,37 @@ JAPW never sees your password. Log in on Chrome, Edge, Firefox, or whatever you 
 | Layer | What we use |
 |--------|-------------|
 | Window | pywebview |
-| Server | Flask (JSON API on `127.0.0.1`, fixed port) |
-| UI | Plain HTML, CSS, JavaScript |
-| Pinterest | Playwright (Chromium), fetch from the page context |
+| Server | Flask (JSON API on `127.0.0.1`, fixed port), split into blueprints in `japw/routes/` |
+| UI | Plain HTML, CSS and ES-module JavaScript (`frontend/js/`) |
+| Pinterest | Direct calls to Pinterest’s resource API with `requests` (`japw/pinterest/`) |
+| X / Twitter | Direct calls to x.com's GraphQL API with `requests` (`japw/x.py`) |
 | Search without login | pinscrape |
 | Cookie import | browser-cookie3 |
+| Images (clipboard, colours) | Pillow |
 | Tests | pytest |
+
+### Project layout
+
+```
+main.py                 window, geometry memory, clean shutdown
+japw/api.py             create_app(): registers the blueprints
+japw/routes/            pinterest · library (likes, collections, downloads, backup) · media · x · system
+japw/feeds.py           shared paged feeds with read-ahead + parallel merged feeds
+japw/pinterest/         session (cookie sync) · client (HTTP) · feeds · parse
+japw/x.py               X session, GraphQL client and media parsing
+japw/taste.py           local taste profile for For You
+japw/colors.py          colour buckets (mirrors frontend/js/core/colors.js)
+japw/media.py           image proxy, PNG conversion, dominant colours
+japw/clipboard.py       native Windows clipboard
+frontend/js/main.js     entry point; feeds/, ui/, core/ hold the rest
+```
 
 ---
 
 ## What you need
 
 - **Python 3.12+** is what this repo is tested with; older 3.x might still work.
-- **Windows** is what `build.bat` and paths assume.
-- After `pip install`, install the browser Playwright needs:
-
-```bash
-playwright install chromium
-```
+- **Windows** is what `build.bat`, paths and the native clipboard assume.
 
 ---
 
@@ -69,7 +91,6 @@ cd JAPW
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
-playwright install chromium
 python main.py
 ```
 
@@ -78,10 +99,11 @@ The UI opens against the local Flask app (default port **52741**).
 ### Tests
 
 ```bash
+pip install -r requirements-dev.txt
 python -m pytest tests/ -q
 ```
 
-A few tests touch the real network; use `-k` to skip them if your machine is offline or flaky.
+The tests are offline: Pinterest, the network and the clipboard are mocked.
 
 ---
 
@@ -89,13 +111,12 @@ A few tests touch the real network; use `-k` to skip them if your machine is off
 
 | How you run it | Where config and data go |
 |----------------|---------------------------|
-| `python main.py` from the repo | Next to the project: `config.json`, `likes.json`, `collections.json`, session files, etc. |
+| `python main.py` from the repo | Next to the project: `config.json`, `likes.json`, `collections.json`, `downloads.json`, session files, `webview/` (UI storage), etc. |
 | The built **JAPW.exe** | `%APPDATA%\JAPW\` |
 
-Handy **config keys** (defaults and merge logic are in `japw_config.py`):
+Handy **config keys** (defaults and merge logic are in `japw/config.py`):
 
 - `download_folder`: where downloads land.
-- `pinterest_boards_page_url`: your boards listing page for the Boards feature.
 - `search_use_pinscrape_when_logged_in`: public pinscrape for search only, even when logged in.
 - `filter_promoted` / `filter_ai_content`: content filters.
 - Resolution filter on/off, target size, and `min` vs `exact` mode.
@@ -108,17 +129,7 @@ Handy **config keys** (defaults and merge logic are in `japw_config.py`):
 build.bat
 ```
 
-That runs **PyInstaller** with **`JAPW.spec`**: one file, no console window, bundles **`frontend/`**, Playwright via **`collect_all("playwright")`**, and imports like **`japw_config`**, **`api`**, **`pinterest_session`**, **`x_session`**. You get **`dist\JAPW.exe`**. Frozen builds set **`PLAYWRIGHT_BROWSERS_PATH=0`** in `main.py` so Chromium rides along inside the exe.
-
----
-
-## Small tools
-
-**`tools/dump_homefeed_json.py`** saves a raw **`UserHomefeedResource`** response while you’re logged in (handy for debugging feeds or promoted flags):
-
-```bash
-python tools/dump_homefeed_json.py -o homefeed.json
-```
+That runs **PyInstaller** with **`JAPW.spec`**: one file, no console window, bundles **`frontend/`** and every `japw` module. You get **`dist\JAPW.exe`** — no bundled browser any more, so it is much smaller than before.
 
 ---
 
@@ -126,14 +137,16 @@ python tools/dump_homefeed_json.py -o homefeed.json
 
 The UI talks to local Flask routes only, for example:
 
-- `/api/home`, `/api/home/more` for the feed.
-- `/api/search`, `/api/search/more` for search.
-- `/api/boards`, `/api/board_pins`, `/api/board_pins/more` for boards.
-- `/api/pin/related`, `/api/pin/resolve` for similar pins and mapping a cover image to a pin URL.
-- `/api/auth/*` for session status, sync, logout.
-- `/api/settings` to read or update config.
-- `/api/download`, `/api/likes`, `/api/collections` for saves and your library.
-- `/x/*` for X session and Artists media.
+- `/api/home`, `/api/foryou`, `/api/search?q=` — paged feeds (`offset`, `limit`, optional `color`, `refresh=1`; returns `posts`, `next_offset`, `has_more`).
+- `/api/taste`, `/api/taste/signal`, `/api/taste/reset` — the local For You profile.
+- `/api/search/prefetch`, `/api/search/suggest` — warm a query while typing; Pinterest suggestions.
+- `/api/boards`, `/api/boards/<id>/pins` — your boards.
+- `/api/pin/related` — More like this.
+- `/api/auth/*` — session status, sync, logout.
+- `/api/settings` — read or update config.
+- `/api/download`, `/api/downloads`, `/api/reveal`, `/api/likes`, `/api/collections` — saves and your library.
+- `/api/clipboard`, `/api/image.png`, `/api/colors` — copy image, PNG proxy, dominant colours.
+- `/x/artists`, `/x/media?username=&offset=` — X artists and their paged media.
 
 Nothing here phones home to a separate JAPW cloud; it’s all on your machine.
 
@@ -141,9 +154,8 @@ Nothing here phones home to a separate JAPW cloud; it’s all on your machine.
 
 ## If something goes wrong
 
-- **“Not connected to Pinterest”:** Open Pinterest in a normal browser, log in, then run sync from Settings with that browser closed if the cookie file is locked.
-- **Playwright weirdness:** Run `playwright install chromium` again and check that security software isn’t blocking the browser binary.
-- **Boards look wrong:** The URL must be your **profile** or **all boards** page, not `…/board/some-name/` by itself.
+- **“Not connected to Pinterest” / “session expired”:** Open Pinterest in a normal browser, log in, then sync from Settings (or the banner). Close that browser first if its cookie file is locked.
+- **Artists tab says “Connect X” or fails:** log in to x.com in your browser, then **Manage → Sync from browser**. JAPW reads X's API details from x.com itself and refreshes them automatically when X changes them.
 - **Search and home don’t match:** That’s expected if you enabled pinscrape for search while logged in; home still follows your account.
 
 ---

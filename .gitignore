@@ -31,6 +31,12 @@ x_artists.json
 x_media_cache.json
 x_state.json
 pinterest_state.json
+downloads.json
+taste.json
+x_ops.json
+colors.json
+window.json
+webview/
 data/
 
 # ── Playwright ─────────────────────────────────────────────────────────────────
@@ -53,3 +59,6 @@ Thumbs.db
 # ── Tooling ───────────────────────────────────────────────────────────────────
 .claude/
 .superpowers/
+
+# ── Landing page (separate repo: p0mpurin/JAPW-site) ─────────────────────────
+JAPW-site/
