@@ -1,32 +1,26 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec for JAPW (one-file, Playwright + Flask + pywebview).
+# PyInstaller spec for JAPW (one-file, Flask + pywebview).
 # Run: build.bat  or  pyinstaller --noconfirm JAPW.spec
 
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
-
-pw_datas, pw_binaries, pw_hidden = collect_all("playwright")
 
 a = Analysis(
     ["main.py"],
     pathex=[],
-    binaries=pw_binaries,
+    binaries=[],
     datas=[
         ("frontend", "frontend"),
-    ] + pw_datas,
-    hiddenimports=[
-        "japw",
-        "japw.config",
-        "japw.api",
-        "japw.pinterest",
-        "japw.x",
+    ],
+    hiddenimports=collect_submodules("japw") + [
+        "PIL",
         "pinscrape",
         "browser_cookie3",
         "flask",
         "requests",
         "webview",
-    ] + pw_hidden,
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

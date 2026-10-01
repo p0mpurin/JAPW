@@ -1,30 +1,27 @@
 """
-X (Twitter) artist media scraper for JAPW.
+X (Twitter) artists for JAPW.
 
-Cookie loading mirrors pinterest_session exactly:
-  - Individual per-browser loaders (no browser_cookie3.load() which trips on IE)
-  - Explicit Zen / Firefox-fork profile paths via cookie_file= parameter
-  - Storage-state JSON file so Playwright gets a full authenticated context
-  - Same timestamp-normalisation logic for Firefox/Zen PRTime microseconds
-
-Scraping mirrors pinterest_session:
-  - Navigate to /media tab → intercept GraphQL JSON responses
-  - Handles both UserMedia (logged-in) and UserTweets (fallback)
-  - Handles timeline_v2.timeline (UserMedia) and timeline (UserTweets)
+Login works like Pinterest: cookies are read from your installed browsers (Chrome, Edge,
+Firefox, Zen, …) and saved locally. Media is then fetched straight from x.com's own GraphQL
+API with those cookies — no browser — and paged through the shared read-ahead feeds.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import queue as _queue
 import re
 import sys
 import threading
+import time
 from http.cookiejar import Cookie
 from pathlib import Path
 from typing import Any
 
+import requests
+from requests.adapters import HTTPAdapter
+
+from japw import feeds
 from japw.config import get_app_data_dir
 
 # ─── Storage ──────────────────────────────────────────────────────────────────
@@ -37,8 +34,8 @@ def _artists_path() -> Path:
     return get_app_data_dir() / "x_artists.json"
 
 
-def _media_cache_path() -> Path:
-    return get_app_data_dir() / "x_media_cache.json"
+def _ops_cache_path() -> Path:
+    return get_app_data_dir() / "x_ops.json"
 
 
 def has_x_session() -> bool:
@@ -50,6 +47,7 @@ def clear_x_session() -> None:
     p = get_x_storage_path()
     if p.exists():
         p.unlink()
+    reload_x_session()
 
 
 # ─── Artist persistence ───────────────────────────────────────────────────────
@@ -96,66 +94,6 @@ def remove_artist(username: str) -> bool:
         return False
     save_artists(new)
     return True
-
-
-# ─── Media cache ──────────────────────────────────────────────────────────────
-
-_CACHE_TTL = 3600  # 1 hour
-
-
-def _load_media_cache() -> dict:
-    p = _media_cache_path()
-    if p.is_file():
-        try:
-            with open(p, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-
-def _save_media_cache(cache: dict) -> None:
-    p = _media_cache_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(cache, f, ensure_ascii=False)
-
-
-def get_cached_artist_posts(username: str) -> list[dict] | None:
-    """Return cached posts if fresh, else None."""
-    import time
-    cache = _load_media_cache()
-    entry = cache.get(username.lower())
-    if not entry:
-        return None
-    if time.time() - entry.get("fetched_at", 0) > _CACHE_TTL:
-        return None
-    return entry.get("posts", [])
-
-
-def get_stale_cached_posts(username: str) -> list[dict]:
-    """Return cached posts regardless of age (used as instant fallback)."""
-    cache = _load_media_cache()
-    entry = cache.get(username.lower())
-    return entry.get("posts", []) if entry else []
-
-
-def update_media_cache(username: str, posts: list[dict]) -> None:
-    import time
-    cache = _load_media_cache()
-    cache[username.lower()] = {"posts": posts, "fetched_at": int(time.time())}
-    _save_media_cache(cache)
-
-
-def invalidate_media_cache(username: str | None = None) -> None:
-    if username is None:
-        p = _media_cache_path()
-        if p.exists():
-            p.unlink()
-    else:
-        cache = _load_media_cache()
-        cache.pop(username.lower(), None)
-        _save_media_cache(cache)
 
 
 # ─── Cookie gathering (mirrors _gather_pinterest_cookies) ─────────────────────
@@ -319,7 +257,7 @@ def _cookies_to_storage_state(cookies: list[Cookie]) -> dict:
 def sync_x_session_from_browsers() -> None:
     """
     Read X/Twitter cookies from installed browsers (including Zen) and
-    write a Playwright storage-state JSON. Same flow as Pinterest sync.
+    write them to a local storage-state JSON (same flow as Pinterest sync).
     """
     cookies = _gather_x_cookies()
     if not cookies:
@@ -346,440 +284,295 @@ def sync_x_session_from_browsers() -> None:
     )
 
 
-# ─── Playwright worker ────────────────────────────────────────────────────────
+# ─── Direct GraphQL client ───────────────────────────────────────────────────
+# x.com's web app talks to /i/api/graphql/<queryId>/<Operation>. Query ids, the public
+# bearer token and the required feature flags all live in the site's main.js bundle, so we
+# read them from there (cached for a few days) instead of hard-coding values that rotate.
 
-_x_queue: "_queue.Queue" = _queue.Queue()
-_x_worker_thread: threading.Thread | None = None
-_x_worker_lock = threading.Lock()
-_X_SHUTDOWN = object()
-_X_RELOAD = object()
-
-
-def _x_context_options() -> dict:
-    opts: dict[str, Any] = {
-        "viewport": {"width": 1280, "height": 900},
-        "locale": "en-US",
-        "user_agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-    }
-    p = get_x_storage_path()
-    if p.is_file():
-        opts["storage_state"] = str(p)
-    return opts
+_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+_OPS_TTL = 3 * 86400
+_TIMEOUT = (6, 25)
+PAGE_SIZE = 40
 
 
-def _x_worker_main() -> None:
-    from playwright.sync_api import sync_playwright
+class XSessionError(RuntimeError):
+    pass
 
-    pw = br = ctx = None
 
-    def _boot() -> None:
-        nonlocal pw, br, ctx
-        pw = sync_playwright().__enter__()
-        br = pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
-        )
-        ctx = br.new_context(**_x_context_options())
-        print("[JAPW/x] X browser worker started", file=sys.stderr)
+class XClient:
+    def __init__(self, cookies: list[dict]) -> None:
+        self._http = requests.Session()
+        self._http.mount("https://", HTTPAdapter(pool_connections=4, pool_maxsize=16, max_retries=1))
+        self._http.headers.update({"User-Agent": _UA, "Accept-Language": "en-US,en;q=0.9"})
+        for c in cookies:
+            if c.get("name") and c.get("value") is not None:
+                self._http.cookies.set(c["name"], c["value"], domain=c.get("domain") or ".x.com", path=c.get("path") or "/")
+        self._ops: dict | None = None
+        self._ops_lock = threading.Lock()
+        self._user_ids: dict[str, str] = {}
 
-    def _close_all() -> None:
-        nonlocal pw, br, ctx
-        for obj, meth in ((ctx, "close"), (br, "close")):
-            if obj is not None:
+    def _ct0(self) -> str:
+        return next((c.value for c in self._http.cookies if c.name == "ct0"), "")
+
+    # ── bootstrap ──
+    def _load_ops(self, force: bool = False) -> dict:
+        with self._ops_lock:
+            if self._ops and not force:
+                return self._ops
+            if not force:
                 try:
-                    getattr(obj, meth)()
-                except Exception:
+                    with open(_ops_cache_path(), encoding="utf-8") as f:
+                        cached = json.load(f)
+                    if time.time() - cached.get("fetched_at", 0) < _OPS_TTL and cached.get("ops"):
+                        self._ops = cached
+                        return cached
+                except (OSError, ValueError):
                     pass
-        if pw is not None:
+            self._ops = self._discover_ops()
             try:
-                pw.__exit__(None, None, None)
-            except Exception:
+                with open(_ops_cache_path(), "w", encoding="utf-8") as f:
+                    json.dump(self._ops, f)
+            except OSError:
                 pass
-        pw = br = ctx = None
+            return self._ops
 
-    try:
-        _boot()
-    except Exception as boot_err:
-        print(f"[JAPW/x] boot failed: {boot_err}", file=sys.stderr)
-        while True:
-            item = _x_queue.get()
-            if item is _X_SHUTDOWN or item is None:
-                return
-            if item is _X_RELOAD:
-                continue
-            _, rq = item
-            rq.put(("err", boot_err))
-        return
-
-    while True:
-        item = _x_queue.get()
-        if item is _X_SHUTDOWN or item is None:
-            _close_all()
-            return
-        if item is _X_RELOAD:
-            # Recreate context after a new session sync
-            try:
-                if ctx:
-                    ctx.close()
-            except Exception:
-                pass
-            try:
-                ctx = br.new_context(**_x_context_options())
-            except Exception as e:
-                print(f"[JAPW/x] reload context error: {e}", file=sys.stderr)
-            continue
-        fn, result_q = item
+    def _discover_ops(self) -> dict:
         try:
-            result_q.put(("ok", fn(ctx)))
-        except Exception as e:
-            result_q.put(("err", e))
+            html = self._http.get("https://x.com/", timeout=_TIMEOUT).text
+            m = re.search(r'https://abs\.twimg\.com/responsive-web/client-web[^"]*/main\.[0-9a-f]+[a-z]?\.js', html)
+            if not m:
+                raise XSessionError("Could not find X's web client bundle.")
+            js = self._http.get(m.group(0), timeout=_TIMEOUT).text
+        except requests.RequestException as e:
+            raise XSessionError(f"Could not reach x.com: {e}") from e
+        bearer = re.search(r'"(AAAAAAAAAAAAAAAAAAAAA[A-Za-z0-9%]+)"', js)
+        if not bearer:
+            raise XSessionError("Could not find X's API token.")
+        ops = {}
+        for name in ("UserByScreenName", "UserMedia"):
+            om = re.search(
+                r'queryId:"([^"]+)",operationName:"' + name + r'",operationType:"query",'
+                r'metadata:\{featureSwitches:\[([^\]]*)\],fieldToggles:\[([^\]]*)\]', js)
+            if not om:
+                raise XSessionError(f"Could not find X operation {name}.")
+            ops[name] = {
+                "id": om.group(1),
+                "features": re.findall(r'"([^"]+)"', om.group(2)),
+                "toggles": re.findall(r'"([^"]+)"', om.group(3)),
+            }
+        return {"fetched_at": time.time(), "bearer": bearer.group(1), "ops": ops}
+
+    # ── calls ──
+    def graphql(self, name: str, variables: dict, referer: str = "https://x.com/") -> dict:
+        for attempt in range(2):
+            boot = self._load_ops(force=attempt > 0)
+            op = boot["ops"][name]
+            params = {
+                "variables": json.dumps(variables, separators=(",", ":")),
+                "features": json.dumps({f: True for f in op["features"]}, separators=(",", ":")),
+            }
+            if op["toggles"]:
+                params["fieldToggles"] = json.dumps({f: False for f in op["toggles"]}, separators=(",", ":"))
+            try:
+                r = self._http.get(
+                    f"https://x.com/i/api/graphql/{op['id']}/{name}",
+                    params=params,
+                    headers={
+                        "authorization": f"Bearer {boot['bearer']}",
+                        "x-csrf-token": self._ct0(),
+                        "x-twitter-auth-type": "OAuth2Session",
+                        "x-twitter-active-user": "yes",
+                        "x-twitter-client-language": "en",
+                        "referer": referer,
+                    },
+                    timeout=_TIMEOUT,
+                )
+            except requests.RequestException as e:
+                raise XSessionError(f"Could not reach x.com: {e}") from e
+            if r.status_code in (401, 403):
+                raise XSessionError("X rejected the session. Sync your X login again in the Artists panel.")
+            if r.status_code == 429:
+                raise XSessionError("X is rate-limiting requests. Try again in a few minutes.")
+            # A rotated query id / new required feature → re-read the bundle once and retry.
+            if r.status_code in (400, 404) and attempt == 0:
+                continue
+            try:
+                body = r.json()
+            except ValueError:
+                raise XSessionError(f"X returned an unexpected response (HTTP {r.status_code}).")
+            if r.status_code >= 400:
+                raise XSessionError(f"X {name} failed (HTTP {r.status_code}).")
+            return body
+        raise XSessionError(f"X {name} failed.")
+
+    def user(self, username: str) -> dict:
+        body = self.graphql("UserByScreenName", {"screen_name": username}, f"https://x.com/{username}")
+        result = ((body.get("data") or {}).get("user") or {}).get("result") or {}
+        if not result.get("rest_id"):
+            raise XSessionError(f"@{username} was not found (or is suspended).")
+        legacy = result.get("legacy") or {}
+        core = result.get("core") or {}
+        avatar = ((result.get("avatar") or {}).get("image_url") or legacy.get("profile_image_url_https") or "")
+        self._user_ids[username.lower()] = result["rest_id"]
+        return {
+            "id": result["rest_id"],
+            "username": core.get("screen_name") or legacy.get("screen_name") or username,
+            "display_name": core.get("name") or legacy.get("name") or username,
+            "avatar_url": avatar.replace("_normal", "_400x400") or None,
+            "protected": bool(legacy.get("protected") or (result.get("privacy") or {}).get("protected")),
+        }
+
+    def user_id(self, username: str) -> str:
+        uid = self._user_ids.get(username.lower())
+        return uid or self.user(username)["id"]
+
+    def media_page(self, username: str, cursor: str | None) -> tuple[list[dict], str | None]:
+        variables = {
+            "userId": self.user_id(username), "count": PAGE_SIZE, "includePromotedContent": False,
+            "withClientEventToken": False, "withBirdwatchNotes": False, "withVoice": True,
+        }
+        if cursor:
+            variables["cursor"] = cursor
+        body = self.graphql("UserMedia", variables, f"https://x.com/{username}/media")
+        return parse_media(body, username)
 
 
-def _x_ensure_worker() -> None:
-    global _x_worker_thread
-    with _x_worker_lock:
-        if _x_worker_thread is None or not _x_worker_thread.is_alive():
-            _x_worker_thread = threading.Thread(
-                target=_x_worker_main, daemon=True, name="x-browser-worker"
-            )
-            _x_worker_thread.start()
+# ─── Parsing ─────────────────────────────────────────────────────────────────
+
+def _tweet_from_item_content(item_content: dict) -> dict | None:
+    result = ((item_content or {}).get("tweet_results") or {}).get("result") or {}
+    if result.get("__typename") == "TweetWithVisibilityResults":
+        result = result.get("tweet") or {}
+    return result if result.get("legacy") else None
 
 
-def _x_run(fn) -> Any:
-    _x_ensure_worker()
-    rq: _queue.Queue = _queue.Queue(maxsize=1)
-    _x_queue.put((fn, rq))
-    status, value = rq.get()
-    if status == "err":
-        raise value
-    return value
+def _tweet_to_post(tweet: dict, username: str) -> dict | None:
+    legacy = tweet.get("legacy") or {}
+    tweet_id = tweet.get("rest_id") or legacy.get("id_str")
+    if not tweet_id:
+        return None
+    author = ((tweet.get("core") or {}).get("user_results") or {}).get("result") or {}
+    screen = (author.get("core") or {}).get("screen_name") or (author.get("legacy") or {}).get("screen_name") or username
+    media = (legacy.get("extended_entities") or {}).get("media") or (legacy.get("entities") or {}).get("media") or []
+    urls: list[str] = []
+    gif = None
+    width = height = 0
+    for m in media:
+        base = (m.get("media_url_https") or "").split("?")[0]
+        info = m.get("original_info") or {}
+        if m.get("type") == "photo" and base:
+            # Keep the extension in the path: likes / downloads key on it (see canonical_key).
+            urls.append(f"{base}?name=orig")
+        elif m.get("type") == "animated_gif":
+            mp4s = [v for v in (m.get("video_info") or {}).get("variants", []) if v.get("content_type") == "video/mp4"]
+            if mp4s:
+                gif = max(mp4s, key=lambda v: v.get("bitrate") or 0)["url"]
+                if base:
+                    urls.append(base)
+        else:
+            continue
+        if not width and info.get("width"):
+            width, height = int(info["width"]), int(info.get("height") or 0)
+    if not urls:
+        return None
+    post = {
+        "urls": urls,
+        "pin_url": f"https://x.com/{screen}/status/{tweet_id}",
+        "artist": username,
+        "source": "x",
+        "title": (legacy.get("full_text") or "").split("https://t.co")[0].strip()[:200],
+    }
+    if width and height:
+        post["width"], post["height"] = width, height
+    if gif:
+        post["gif_video_url"] = gif
+    return post
+
+
+def parse_media(body: dict, username: str) -> tuple[list[dict], str | None]:
+    """UserMedia response → (posts, bottom cursor). Handles the first page (a grid module
+    inside TimelineAddEntries) and later pages (TimelineAddToModule)."""
+    result = ((body.get("data") or {}).get("user") or {}).get("result") or {}
+    outer = result.get("timeline_v2") or result.get("timeline") or {}
+    timeline = outer.get("timeline") or outer
+    posts: list[dict] = []
+    cursor = None
+
+    def take(item_content):
+        tweet = _tweet_from_item_content(item_content)
+        post = tweet and _tweet_to_post(tweet, username)
+        if post:
+            posts.append(post)
+
+    for instr in timeline.get("instructions") or []:
+        for entry in instr.get("entries") or []:
+            content = entry.get("content") or {}
+            if content.get("cursorType") == "Bottom":
+                cursor = content.get("value")
+            elif content.get("items"):
+                for it in content["items"]:
+                    take((it.get("item") or {}).get("itemContent"))
+            elif content.get("itemContent"):
+                take(content["itemContent"])
+        for it in instr.get("moduleItems") or []:
+            take((it.get("item") or {}).get("itemContent"))
+    # X keeps returning a cursor after the last page; stop when a page brings nothing new.
+    return posts, (cursor if posts else None)
+
+
+# ─── Public API ──────────────────────────────────────────────────────────────
+
+_client: XClient | None = None
+_client_lock = threading.Lock()
+
+
+def get_client() -> XClient:
+    global _client
+    with _client_lock:
+        if _client is None:
+            if not has_x_session():
+                raise XSessionError("Not connected to X. Sync your X login in the Artists panel.")
+            with open(get_x_storage_path(), encoding="utf-8") as f:
+                _client = XClient(json.load(f).get("cookies") or [])
+        return _client
 
 
 def reload_x_session() -> None:
-    """Tell the worker to reload its browser context with fresh storage state."""
-    _x_ensure_worker()
-    _x_queue.put(_X_RELOAD)
+    """Drop the client (and cached feeds) so the next call uses freshly synced cookies."""
+    global _client
+    with _client_lock:
+        _client = None
+    feeds.cache.drop(lambda key: key[0] == "x")
 
-
-# ─── GraphQL response matchers ────────────────────────────────────────────────
-
-def _is_media_response(url: str, content_type: str | None) -> bool:
-    """
-    Match UserMedia (logged-in media tab) and UserTweets (unauthenticated
-    fallback). Domain is now api.x.com — but /graphql/ is always present.
-    """
-    return (
-        ("UserMedia" in url or "UserTweets" in url)
-        and "/graphql/" in url
-        and "application/json" in (content_type or "")
-    )
-
-
-def _is_user_response(url: str, content_type: str | None) -> bool:
-    return (
-        "UserByScreenName" in url
-        and "/graphql/" in url
-        and "application/json" in (content_type or "")
-    )
-
-
-# ─── GraphQL parsers ──────────────────────────────────────────────────────────
-
-def _unwrap_tweet(tweet_result: dict) -> dict | None:
-    """Unwrap TweetWithVisibilityResults and return the tweet if it has legacy data."""
-    if not tweet_result:
-        return None
-    if tweet_result.get("__typename") == "TweetWithVisibilityResults":
-        tweet_result = tweet_result.get("tweet", tweet_result)
-    return tweet_result if tweet_result.get("legacy") else None
-
-
-def _tweet_from_entry(entry: dict) -> dict | None:
-    """Extract tweet from a TimelineAddEntries entry (regular timeline)."""
-    content = entry.get("content") or {}
-    item_content = content.get("itemContent", {})
-    result = item_content.get("tweet_results", {}).get("result", {})
-    return _unwrap_tweet(result)
-
-
-def _tweet_from_module_item(mod_item: dict) -> dict | None:
-    """Extract tweet from a TimelineAddToModule moduleItem (media grid)."""
-    item_content = mod_item.get("item", {}).get("itemContent", {})
-    result = item_content.get("tweet_results", {}).get("result", {})
-    return _unwrap_tweet(result)
-
-
-def _parse_media_response(
-    body: dict,
-    username: str,
-    seen_ids: set[str],
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    posts: list[dict[str, Any]] = []
-    user_info: dict[str, Any] = {}
-
-    try:
-        user_result = (
-            body.get("data", {})
-            .get("user", {})
-            .get("result", {})
-        )
-
-        # User info — present on UserByScreenName; UserMedia only has __typename + timeline
-        legacy_u = user_result.get("legacy", {})
-        if legacy_u:
-            user_info = {
-                "username": legacy_u.get("screen_name", username),
-                "display_name": legacy_u.get("name", username),
-                "avatar_url": (
-                    (legacy_u.get("profile_image_url_https") or "")
-                    .replace("_normal", "_400x400") or None
-                ),
-            }
-
-        # Path varies by endpoint:
-        #   UserMedia  → result.timeline.timeline.instructions   (nested timeline)
-        #   UserTweets → result.timeline.instructions            (single timeline)
-        #   Old API    → result.timeline_v2.timeline.instructions
-        outer = (
-            user_result.get("timeline_v2")
-            or user_result.get("timeline")
-            or {}
-        )
-        tl = outer.get("timeline") or outer  # handle both nested and flat
-        instructions = tl.get("instructions", [])
-
-        for instr in instructions:
-            instr_type = instr.get("type", "")
-
-            if instr_type == "TimelineAddEntries":
-                # Regular timeline — items live in entry.content.itemContent
-                for entry in instr.get("entries", []):
-                    tweet = _tweet_from_entry(entry)
-                    _collect_tweet(tweet, username, seen_ids, posts, user_info)
-
-            elif instr_type == "TimelineAddToModule":
-                # Media grid — items live in moduleItem.item.itemContent
-                for mod_item in instr.get("moduleItems", []):
-                    tweet = _tweet_from_module_item(mod_item)
-                    _collect_tweet(tweet, username, seen_ids, posts, user_info)
-
-            else:
-                # TimelineClearCache, TimelinePinEntry, etc. — skip
-                pass
-
-    except Exception as e:
-        print(f"[JAPW/x] parse error: {e}", file=sys.stderr)
-
-    return posts, user_info
-
-
-def _collect_tweet(
-    tweet: dict | None,
-    username: str,
-    seen_ids: set[str],
-    posts: list,
-    user_info: dict,
-) -> None:
-    """Extract image URLs from a tweet node and append to posts."""
-    if not tweet:
-        return
-
-    legacy = tweet.get("legacy", {})
-    tweet_id = tweet.get("rest_id") or legacy.get("id_str") or ""
-    if not tweet_id or tweet_id in seen_ids:
-        return
-
-    # Grab screen name for the permalink (from tweet author's core)
-    core_screen = (
-        tweet.get("core", {})
-        .get("user_results", {})
-        .get("result", {})
-        .get("legacy", {})
-        .get("screen_name")
-    ) or username
-
-    # Backfill user_info from the first tweet we see
-    if not user_info and core_screen:
-        author_legacy = (
-            tweet.get("core", {})
-            .get("user_results", {})
-            .get("result", {})
-            .get("legacy", {})
-        )
-        if author_legacy:
-            user_info.update({
-                "username": author_legacy.get("screen_name", username),
-                "display_name": author_legacy.get("name", username),
-                "avatar_url": (
-                    (author_legacy.get("profile_image_url_https") or "")
-                    .replace("_normal", "_400x400") or None
-                ),
-            })
-
-    media_list = (
-        legacy.get("extended_entities", {}).get("media")
-        or legacy.get("entities", {}).get("media")
-        or []
-    )
-
-    urls: list[str] = []
-    gif_video_url: str | None = None
-
-    for m in media_list:
-        mtype = m.get("type")
-        if mtype == "photo":
-            base = (m.get("media_url_https") or m.get("media_url") or "").split("?")[0]
-            if base:
-                urls.append(base + "?name=orig&format=jpg")
-        elif mtype == "animated_gif":
-            variants = m.get("video_info", {}).get("variants", [])
-            mp4s = [v for v in variants if v.get("content_type") == "video/mp4"]
-            if mp4s:
-                gif_video_url = mp4s[0]["url"]
-                thumb = (m.get("media_url_https") or m.get("media_url") or "").split("?")[0]
-                if thumb:
-                    urls.append(thumb)
-
-    if not urls and not gif_video_url:
-        return
-
-    seen_ids.add(tweet_id)
-    post: dict = {
-        "urls": urls or [gif_video_url],
-        "pin_url": f"https://x.com/{core_screen}/status/{tweet_id}",
-        "artist": username,
-        "source": "x",
-    }
-    if gif_video_url:
-        post["gif_video_url"] = gif_video_url
-    posts.append(post)
-
-
-def _parse_user_by_screenname(body: dict, username: str) -> dict[str, Any]:
-    try:
-        result = body.get("data", {}).get("user", {}).get("result", {})
-        legacy = result.get("legacy", {})
-        if legacy:
-            return {
-                "username": legacy.get("screen_name", username),
-                "display_name": legacy.get("name", username),
-                "avatar_url": (
-                    (legacy.get("profile_image_url_https") or "")
-                    .replace("_normal", "_400x400") or None
-                ),
-            }
-    except Exception:
-        pass
-    return {}
-
-
-# ─── Public scraping API ──────────────────────────────────────────────────────
 
 def fetch_user_info(username: str) -> dict[str, Any]:
     username = username.lstrip("@").strip()
-    default = {"username": username, "display_name": username, "avatar_url": None}
-
-    def _task(ctx):
-        page = ctx.new_page()
-        captured: list[dict] = []
-
-        def on_response(response):
-            try:
-                ct = response.headers.get("content-type", "")
-                if _is_user_response(response.url, ct) or _is_media_response(response.url, ct):
-                    captured.append(response.json())
-            except Exception:
-                pass
-
-        def intercept(route):
-            if route.request.resource_type in ("image", "media", "font", "stylesheet"):
-                route.abort()
-            else:
-                route.fallback()
-
-        page.route("**/*", intercept)
-        page.on("response", on_response)
-
-        try:
-            page.goto(f"https://x.com/{username}", wait_until="domcontentloaded", timeout=20000)
-            page.wait_for_timeout(2500)
-            for body in captured:
-                info = _parse_user_by_screenname(body, username)
-                if not info:
-                    _, info = _parse_media_response(body, username, set())
-                if info.get("display_name"):
-                    return info
-            return default
-        finally:
-            try:
-                page.close()
-            except Exception:
-                pass
-
-    try:
-        return _x_run(_task)
-    except Exception:
-        return default
+    info = get_client().user(username)
+    return {k: info[k] for k in ("username", "display_name", "avatar_url", "protected")}
 
 
-def fetch_user_media(username: str, count: int = 500) -> list[dict[str, Any]]:
-    username = username.lstrip("@").strip()
+def _artist_feed(username: str, fresh: bool = False) -> feeds.Feed:
+    key = ("x", "artist", username.lower())
+    return feeds.cache.get(key, lambda: feeds.Feed(lambda cur: get_client().media_page(username, cur), f"x:{username}"),
+                           fresh=fresh, ttl=20 * 60)
 
-    def _task(ctx):
-        page = ctx.new_page()
-        all_posts: list[dict[str, Any]] = []
-        seen_ids: set[str] = set()
 
-        def on_response(response):
-            try:
-                ct = response.headers.get("content-type", "")
-                if not _is_media_response(response.url, ct):
-                    return
-                body = response.json()
-                new_posts, _ = _parse_media_response(body, username, seen_ids)
-                all_posts.extend(new_posts)
-            except Exception as e:
-                print(f"[JAPW/x] response parse: {e}", file=sys.stderr)
+def media(username: str | None = None, offset: int = 0, limit: int = 40, refresh: bool = False):
+    """One artist's media, or (username=None) every artist interleaved. Returns (posts, has_more)."""
+    if username:
+        return _artist_feed(username, fresh=refresh and offset == 0).get(offset, limit)
+    names = [a["username"] for a in load_artists() if a.get("username")]
+    if not names:
+        return [], False
+    key = ("x", "all", tuple(n.lower() for n in names))
+    fresh = refresh and offset == 0
 
-        def intercept(route):
-            if route.request.resource_type in ("image", "media", "font", "stylesheet"):
-                route.abort()
-            else:
-                route.fallback()
+    def factory():
+        sources = [_artist_feed(n, fresh=fresh) for n in names]
+        return feeds.Feed(feeds.merged_pages(sources, per_source=20), "x:all", merged=True)
+    return feeds.cache.get(key, factory, fresh=fresh, ttl=20 * 60).get(offset, limit)
 
-        page.route("**/*", intercept)
-        page.on("response", on_response)
 
-        try:
-            page.goto(
-                f"https://x.com/{username}/media",
-                wait_until="domcontentloaded",
-                timeout=25000,
-            )
-            page.wait_for_timeout(2500)
-
-            stagnant = 0
-            last_count = 0
-            for _ in range(20):
-                page.evaluate("window.scrollBy(0, 3000)")
-                page.wait_for_timeout(1500)
-                if len(all_posts) == last_count:
-                    stagnant += 1
-                    if stagnant >= 5:
-                        break
-                else:
-                    stagnant = 0
-                    last_count = len(all_posts)
-
-            return all_posts[:count]
-        finally:
-            try:
-                page.close()
-            except Exception:
-                pass
-
-    return _x_run(_task)
+def shutdown(timeout: float = 0) -> None:
+    """Nothing to stop any more (kept so main.py can treat both services alike)."""

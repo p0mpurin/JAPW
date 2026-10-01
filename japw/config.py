@@ -21,7 +21,6 @@ def get_default_config() -> dict:
         "resolution_target_width": 1920,
         "resolution_target_height": 1080,
         "resolution_match_mode": "min",
-        "pinterest_boards_page_url": "",
         "search_use_pinscrape_when_logged_in": False,
         "filter_promoted": True,
         "filter_ai_content": False,
@@ -113,3 +112,57 @@ def save_collections(config_path=None, data=None):
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w", encoding="utf-8") as f:
         json.dump(data or {"collections": []}, f, indent=2)
+
+
+# ─── Downloads index (canonical image key → saved file path) ───
+
+def _downloads_path(config_path=None):
+    if config_path:
+        return Path(config_path).parent / "downloads.json"
+    return get_app_data_dir() / "downloads.json"
+
+
+def load_downloads(config_path=None):
+    p = _downloads_path(config_path)
+    if p.exists():
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, dict) and isinstance(d.get("items"), dict):
+                return d
+        except Exception:
+            pass
+    return {"items": {}}
+
+
+def save_downloads(config_path=None, data=None):
+    p = _downloads_path(config_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(data or {"items": {}}, f)
+
+
+# ─── Window geometry (size / position / maximized) ───
+
+def _window_state_path():
+    return get_app_data_dir() / "window.json"
+
+
+def load_window_state() -> dict:
+    p = _window_state_path()
+    if p.exists():
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                return d
+        except Exception:
+            pass
+    return {}
+
+
+def save_window_state(state: dict) -> None:
+    p = _window_state_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(state, f)

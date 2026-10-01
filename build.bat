@@ -27,7 +27,7 @@ if %ERRORLEVEL% NEQ 0 (
 echo Using Python: %PYTHON_CMD%
 echo.
 
-echo [1/4] pip install -r requirements-dev.txt
+echo [1/3] pip install -r requirements-dev.txt
 "%PYTHON_CMD%" -m pip install -r requirements-dev.txt
 if %ERRORLEVEL% NEQ 0 (
     echo [ERROR] pip install failed
@@ -36,7 +36,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
-echo [2/4] Icon: logo.jpg -^> logo.ico ^(Pillow^)
+echo [2/3] Icon: logo.jpg -^> logo.ico ^(Pillow^)
 if not exist "logo.jpg" (
     echo [ERROR] logo.jpg missing at repo root.
     pause
@@ -50,15 +50,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
-echo [3/4] Playwright Chromium  ^(PLAYWRIGHT_BROWSERS_PATH=0 for bundling^)
-set "PLAYWRIGHT_BROWSERS_PATH=0"
-"%PYTHON_CMD%" -m playwright install chromium
-if %ERRORLEVEL% NEQ 0 (
-    echo [WARN] playwright install failed — run manually if scraping breaks.
-)
-
-echo.
-echo [4/4] PyInstaller  JAPW.spec  --onefile  --windowed
+echo [3/3] PyInstaller  JAPW.spec  --onefile  --windowed
 "%PYTHON_CMD%" -m PyInstaller --noconfirm JAPW.spec
 if %ERRORLEVEL% NEQ 0 (
     echo [ERROR] PyInstaller failed.
