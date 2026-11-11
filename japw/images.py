@@ -65,5 +65,5 @@ def pinimg_sized(url: str, bucket: str) -> str:
     """
     out = re.sub(r"i\.pinimg\.com/(?:originals|\d+x(?:\d+)?)/", f"i.pinimg.com/{bucket}/", url, flags=re.I)
     if bucket != "originals":
-        out = re.sub(r"\.(png|gif|webp|jpeg)(?=$|\?)", ".jpg", out, flags=re.I)
+        out = re.sub(r"\.(?!jpg\b)[a-z0-9]{2,5}(?=$|\?)", ".jpg", out, flags=re.I)
     return out

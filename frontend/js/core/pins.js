@@ -38,8 +38,8 @@ export function pinimgSize(url, bucket) {
     /i\.pinimg\.com\/(?:originals|\d+x(?:\d+)?)\//i,
     `i.pinimg.com/${bucket}/`,
   );
-  // Sized buckets only exist as .jpg: a .png / .gif / .webp original's 236x path is a 403.
-  return bucket === "originals" ? out : out.replace(/\.(png|gif|webp|jpeg)(?=$|\?)/i, ".jpg");
+  // Sized buckets only exist as .jpg: a .png / .gif / .webp / .heic original's 236x path is a 403.
+  return bucket === "originals" ? out : out.replace(/\.(?!jpg\b)[a-z0-9]{2,5}(?=$|\?)/i, ".jpg");
 }
 
 /**
