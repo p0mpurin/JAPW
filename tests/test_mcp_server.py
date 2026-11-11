@@ -12,11 +12,45 @@ POST = {"urls": [IMG], "pin_url": "https://www.pinterest.com/pin/123/", "color":
         "width": 1200, "height": 1600, "title": "A blue thing"}
 
 
+class _Resp:
+    def __init__(self, r):
+        self.status_code = r.status_code
+        self.ok = r.status_code < 400
+        self._data = r.get_json(silent=True)
+
+    def json(self):
+        if self._data is None:
+            raise ValueError("no json")
+        return self._data
+
+
+class _AppHttp:
+    """Routes the MCP server's HTTP calls into the Flask test client."""
+
+    def __init__(self, client):
+        self.c = client
+
+    def request(self, method, url, params=None, json=None, files=None, timeout=None):
+        path = url.split("52741", 1)[1]
+        kw = {"query_string": params or {}}
+        if files:
+            kw["data"] = {k: (__import__("io").BytesIO(v[1]), v[0]) for k, v in files.items()}
+        else:
+            kw["json"] = json
+        return _Resp(self.c.open(path, method=method, **kw))
+
+    def get(self, url, **kw):
+        return self.request("GET", url, **kw)
+
+
 @pytest.fixture
-def server(isolated_app_data, monkeypatch):
-    monkeypatch.setenv("JAPW_DATA_DIR", str(isolated_app_data))
+def server(client, monkeypatch):
     import japw.mcp_server as m
 
+    monkeypatch.setattr(m, "APP_URL", "http://127.0.0.1:52741")
+    monkeypatch.setattr(m, "_http", _AppHttp(client))
+    monkeypatch.setattr(m, "_ensure_app", lambda: None)
+    monkeypatch.setattr(m, "_pool", type("SyncPool", (), {"map": staticmethod(lambda f, xs: list(map(f, xs)))})())
     m._refs.clear()
     return m
 
@@ -50,7 +84,7 @@ def test_refs_are_stable_and_resolvable(server):
 
 
 def test_search_listing_has_numbered_pins(server):
-    with patch("japw.pinterest.search", return_value=([POST], True)):
+    with patch("japw.pinterest.search", return_value=([POST], True)), patch("japw.pinterest.has_session", return_value=True):
         out = server.search_pins("blue", count=5, preview=False)
     data = json.loads(text(out))
     assert data["has_more"] and data["next_offset"] == 1
@@ -70,10 +104,10 @@ def test_contact_sheet_is_an_image(server):
     assert content.mime_type == "image/jpeg" and len(content.data) > 100
 
 
-def test_library_tools_round_trip(server):
+def test_library_tools_round_trip(server, config_path):
     ref = server._remember(POST)
     assert "Liked 1" in server.like_pins([ref])
-    assert lib.is_liked(POST["urls"])
+    assert lib.is_liked(POST["urls"], config_path)
     assert "Added 1" in server.add_to_collection("Blues", [ref])
     assert "already" in server.add_to_collection("Blues", [ref])
     listed = json.loads(text(server.collection_pins("blues", preview=False)))
@@ -81,7 +115,7 @@ def test_library_tools_round_trip(server):
     assert "Not deleted" in server.delete_collection("Blues")
     assert "Deleted" in server.delete_collection("Blues", confirm=True)
     assert "Unliked 1" in server.unlike_pins([ref])
-    assert not lib.is_liked(POST["urls"])
+    assert not lib.is_liked(POST["urls"], config_path)
 
 
 def test_download_tool_uses_subfolder_and_names(server, tmp_path):
@@ -93,7 +127,7 @@ def test_download_tool_uses_subfolder_and_names(server, tmp_path):
     ref = server._remember(POST)
     with patch("japw.library.requests.get", return_value=resp):
         out = json.loads(server.download_pins([ref], subfolder="Blue: walls?", name="sky"))
-    assert out["saved"] == 1 and not out["errors"]
+    assert out["saved"] == 1 and not out["errors"], out
     saved = out["files"][0]
     assert saved.endswith("sky.jpg") and "Blue walls" in saved
 

@@ -112,7 +112,8 @@ def remove_from_collection(col_id):
 def download():
     data = body()
     try:
-        path = lib.download(data.get("url") or "", data.get("key"), cfg_path())
+        path = lib.download(data.get("url") or "", data.get("key"), cfg_path(),
+                            subfolder=data.get("subfolder") or None, name=data.get("name") or None)
     except lib.LibraryError as e:
         return _fail(e)
     key = (data.get("key") or "").strip() or lib.canonical_key(data["url"].strip())

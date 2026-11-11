@@ -3,9 +3,12 @@ JAPW as an MCP server: lets an AI assistant do everything the app can — find p
 image, colour or taste, look at them, like / collect / download them, browse boards and X
 artists, and manage settings.
 
-Run:  python -m japw.mcp_server          (stdio transport)
-Data: shares the app's data folder (%APPDATA%\\JAPW, or JAPW_DATA_DIR), so likes, collections,
-      downloads and logins are the same ones you see in the app.
+Run:  python japw_mcp.py   (or python -m japw.mcp_server) — stdio transport.
+
+Everything goes through the running JAPW app's local API (http://127.0.0.1:52741), which is
+opened automatically if it isn't running. The server itself never writes JAPW's files: when it
+is started by a packaged (MSIX) app such as Claude Desktop, Windows redirects its AppData
+writes into a private copy the app can't see. Going through the app keeps one source of truth.
 
 Every pin a tool returns gets a short, stable `ref` (e.g. "p3f9a1c2"). Pass refs to the
 action tools. Listing tools also return a numbered contact sheet so the assistant can *see*
@@ -14,39 +17,32 @@ the pins before choosing.
 
 from __future__ import annotations
 
+import concurrent.futures
+import hashlib
+import io
+import json
 import os
+import subprocess
 import sys
+import threading
+import time
+from collections import OrderedDict
 from pathlib import Path
+from typing import Annotated, Any, Literal
 
-# Share the installed app's data unless told otherwise. Must happen before japw imports.
-if not os.environ.get("JAPW_DATA_DIR"):
-    _appdata = Path(os.environ.get("APPDATA", Path.home())) / "JAPW"
-    if _appdata.is_dir() or getattr(sys, "frozen", False):
-        os.environ["JAPW_DATA_DIR"] = str(_appdata)
+import requests
+from mcp.server.mcpserver import Image, MCPServer
+from pydantic import Field
 
-import concurrent.futures  # noqa: E402
-import hashlib  # noqa: E402
-import io  # noqa: E402
-import json  # noqa: E402
-import threading  # noqa: E402
-import webbrowser  # noqa: E402
-from collections import OrderedDict  # noqa: E402
-from typing import Annotated, Any, Literal  # noqa: E402
+from japw.colors import bucket as color_bucket
+from japw.images import canonical_key, pinimg_sized
 
-from mcp.server.mcpserver import Image, MCPServer  # noqa: E402
-from pydantic import Field  # noqa: E402
-
-import japw.pinterest as ps  # noqa: E402
-import japw.x as xs  # noqa: E402
-from japw import feeds, library as lib, taste  # noqa: E402
-from japw.colors import BUCKETS, bucket as color_bucket  # noqa: E402
-from japw.config import get_app_data_dir, load_config, save_config  # noqa: E402
-from japw.images import canonical_key, pinimg_sized  # noqa: E402
-from japw.media import _http as media_http, dominant_colors, fetch_png, is_allowed_image_url  # noqa: E402
-from japw.pinterest.parse import set_content_filters  # noqa: E402
+APP_URL = os.environ.get("JAPW_URL", "http://127.0.0.1:52741").rstrip("/")
+ALLOWED_HOSTS = ("i.pinimg.com", "v.pinimg.com", "pbs.twimg.com", "video.twimg.com")
 
 INSTRUCTIONS = """\
 JAPW is the user's Pinterest + X art browser. Use these tools to find, look at, and save images.
+They act through the JAPW app (opened automatically if needed), so changes show up there.
 
 How it works:
 - Every pin you get back has a short `ref` (like "p3f9a1c2"). Pass refs to action tools
@@ -58,12 +54,13 @@ How it works:
   `color` on home_feed / for_you / search_pins filters server-side (fast).
 - "More like these": similar_pins (Pinterest's related pins) or search_by_image (visual match;
   works for any picture, including X art and local files).
+- Collection names match case-insensitively, so "handhelds" finds "Handhelds".
 - Downloads land in the user's download folder (see japw_status); `subfolder` groups them.
 - Liking, collecting and downloading also teach the user's For You feed.
 Don't download or change the library unless the user asked for it.
 """
 
-mcp = MCPServer("JAPW", instructions=INSTRUCTIONS, version="1.2.0")
+mcp = MCPServer("JAPW", instructions=INSTRUCTIONS, version="1.3.0")
 
 Color = Literal["red", "orange", "yellow", "green", "teal", "blue", "purple", "pink", "brown", "black", "gray", "white"]
 Count = Annotated[int, Field(ge=1, le=100, description="How many pins to return")]
@@ -71,10 +68,105 @@ Offset = Annotated[int, Field(ge=0, description="Skip this many (for paging: pas
 Preview = Annotated[bool, Field(description="Include a numbered contact-sheet image of the results")]
 Refs = Annotated[list[str], Field(min_length=1, description="Pin refs (from earlier results) or image URLs")]
 
+
+# ─── Talking to the app ──────────────────────────────────────────────────────
+
+class AppError(RuntimeError):
+    pass
+
+
+_http = requests.Session()
+_http.mount("http://", requests.adapters.HTTPAdapter(pool_maxsize=16))
+_cdn = requests.Session()
+_cdn.headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) JAPW"
+_cdn.mount("https://", requests.adapters.HTTPAdapter(pool_maxsize=24))
+_launch_lock = threading.Lock()
+
+
+def _app_up() -> bool:
+    try:
+        return _http.get(f"{APP_URL}/api/auth/status", timeout=1.5).ok
+    except requests.RequestException:
+        return False
+
+
+def _find_exe() -> Path | None:
+    """The installed app: JAPW_EXE, a build next to this source tree, or the frozen exe itself."""
+    candidates = [os.environ.get("JAPW_EXE")]
+    if getattr(sys, "frozen", False):
+        candidates.append(sys.executable)
+    root = Path(__file__).resolve().parent.parent
+    candidates.append(str(root / "dist" / "JAPW" / "JAPW.exe"))
+    for c in candidates:
+        if c and Path(c).is_file():
+            return Path(c)
+    return None
+
+
+def _ensure_app() -> None:
+    """Make sure the JAPW app is running; start it if not."""
+    if _app_up():
+        return
+    with _launch_lock:
+        if _app_up():
+            return
+        exe = _find_exe()
+        if not exe:
+            raise AppError("The JAPW app isn't running. Ask the user to open JAPW, then try again.")
+        # Launch through Explorer: started from a packaged app (e.g. Claude Desktop) it would
+        # otherwise inherit that package's redirected AppData and miss the user's real data.
+        if sys.platform == "win32":
+            subprocess.Popen(["explorer.exe", str(exe)])
+        else:
+            subprocess.Popen([str(exe)], start_new_session=True)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if _app_up():
+                return
+            time.sleep(0.5)
+        raise AppError("Started JAPW but it didn't answer in time. Ask the user to check the app window.")
+
+
+def api(method: str, path: str, *, timeout: float = 60, **kw) -> Any:
+    _ensure_app()
+    try:
+        r = _http.request(method, f"{APP_URL}{path}", timeout=timeout, **kw)
+    except requests.RequestException as e:
+        raise AppError(f"Couldn't reach the JAPW app: {e}") from e
+    try:
+        data = r.json()
+    except ValueError:
+        data = {}
+    if r.status_code >= 400 or (isinstance(data, dict) and data.get("error")):
+        msg = data.get("error") if isinstance(data, dict) else None
+        if isinstance(data, dict) and data.get("code") == "session_expired":
+            msg = "Pinterest session expired — ask the user to sync again (sync_pinterest_login)."
+        raise AppError(msg or f"JAPW returned HTTP {r.status_code}")
+    return data
+
+
+def get(path: str, **params) -> Any:
+    return api("GET", path, params={k: v for k, v in params.items() if v is not None})
+
+
+def post(path: str, body: dict | None = None, **kw) -> Any:
+    return api("POST", path, json=body or {}, **kw)
+
+
 # ─── Ref store ───────────────────────────────────────────────────────────────
 
 _refs: OrderedDict[str, dict] = OrderedDict()
 _refs_lock = threading.Lock()
+
+
+def _is_cdn(url: str) -> bool:
+    from urllib.parse import urlsplit
+
+    try:
+        p = urlsplit(url)
+    except ValueError:
+        return False
+    return p.scheme == "https" and p.hostname in ALLOWED_HOSTS
 
 
 def _ref_for(post: dict) -> str:
@@ -98,7 +190,7 @@ def _resolve(ref_or_url: str) -> dict:
     with _refs_lock:
         if s in _refs:
             return dict(_refs[s])
-    if s.startswith("https://") and is_allowed_image_url(s):
+    if _is_cdn(s):
         post = {"urls": [s]}
         _remember(post)
         return post
@@ -115,8 +207,7 @@ def _thumb_url(url: str, px: int = 236) -> str:
     if "i.pinimg.com" in url:
         return pinimg_sized(url, "236x" if px <= 236 else "474x" if px <= 474 else "736x")
     if "pbs.twimg.com/media/" in url:
-        base = url.split("?")[0]
-        return f"{base}?name={'small' if px <= 680 else 'large'}"
+        return f"{url.split('?')[0]}?name={'small' if px <= 680 else 'large'}"
     return url
 
 
@@ -147,14 +238,14 @@ def _summary(post: dict, index: int | None = None) -> dict:
 
 def _fetch_image(url: str, timeout: float = 15) -> bytes | None:
     try:
-        r = media_http.get(url, timeout=timeout)
+        r = _cdn.get(url, timeout=timeout)
         r.raise_for_status()
         return r.content
     except Exception:
         return None
 
 
-_thumb_pool = concurrent.futures.ThreadPoolExecutor(max_workers=12, thread_name_prefix="JAPW-mcp-thumb")
+_pool = concurrent.futures.ThreadPoolExecutor(max_workers=12, thread_name_prefix="JAPW-mcp")
 
 
 def _contact_sheet(posts: list[dict], start: int = 1, cols: int = 6, tile_w: int = 180, tile_h: int = 225) -> Image | None:
@@ -163,31 +254,33 @@ def _contact_sheet(posts: list[dict], start: int = 1, cols: int = 6, tile_w: int
         return None
     from PIL import Image as PILImage, ImageDraw, ImageFont, ImageOps
 
-    datas = list(_thumb_pool.map(lambda p: _fetch_image(_thumb_url(p["urls"][0])), posts))
+    datas = list(_pool.map(lambda p: _fetch_image(_thumb_url(p["urls"][0])), posts))
     cols = min(cols, len(posts))
     rows = (len(posts) + cols - 1) // cols
     gap = 6
     sheet = PILImage.new("RGB", (cols * tile_w + (cols + 1) * gap, rows * tile_h + (rows + 1) * gap), (16, 16, 18))
     draw = ImageDraw.Draw(sheet)
     try:
-        font = ImageFont.truetype("arialbd.ttf", 18)
+        font = ImageFont.truetype("arialbd.ttf", 20)
     except OSError:
         font = ImageFont.load_default()
     for i, data in enumerate(datas):
         x = gap + (i % cols) * (tile_w + gap)
         y = gap + (i // cols) * (tile_h + gap)
+        placed = False
         if data:
             try:
                 im = PILImage.open(io.BytesIO(data)).convert("RGB")
                 sheet.paste(ImageOps.fit(im, (tile_w, tile_h), PILImage.Resampling.LANCZOS), (x, y))
+                placed = True
             except Exception:
-                draw.rectangle([x, y, x + tile_w, y + tile_h], fill=(40, 40, 46))
-        else:
+                pass
+        if not placed:
             draw.rectangle([x, y, x + tile_w, y + tile_h], fill=(40, 40, 46))
         label = str(start + i)
-        w = draw.textlength(label, font=font) + 12
-        draw.rounded_rectangle([x + 5, y + 5, x + 5 + w, y + 31], radius=8, fill=(0, 0, 0))
-        draw.text((x + 11, y + 7), label, fill=(255, 255, 255), font=font)
+        w = draw.textlength(label, font=font) + 14
+        draw.rounded_rectangle([x + 5, y + 5, x + 5 + w, y + 33], radius=8, fill=(0, 0, 0))
+        draw.text((x + 12, y + 7), label, fill=(255, 255, 255), font=font)
     out = io.BytesIO()
     sheet.save(out, "JPEG", quality=82)
     return Image(data=out.getvalue(), format="jpeg")
@@ -201,14 +294,22 @@ def _listing(posts: list[dict], header: dict, preview: bool, offset: int = 0) ->
     return [text, sheet] if sheet else [text]
 
 
-def _page_header(offset: int, posts: list, has_more: bool, **extra) -> dict:
-    return {**extra, "offset": offset, "next_offset": offset + len(posts), "has_more": has_more}
+def _paged(data: dict, offset: int, **extra) -> tuple[list[dict], dict]:
+    posts = [p for p in data.get("posts", []) if p.get("urls")]
+    return posts, {**extra, "offset": offset, "next_offset": data.get("next_offset", offset + len(posts)),
+                   "has_more": bool(data.get("has_more"))}
 
 
 def _err(e: Exception) -> str:
-    if isinstance(e, ps.PinterestAuthExpired):
-        return "Pinterest session expired — ask the user to sync again (sync_pinterest_login)."
-    return f"{type(e).__name__}: {e}"
+    return str(e) if isinstance(e, (AppError, ValueError)) else f"{type(e).__name__}: {e}"
+
+
+def _signal(kind: str, posts: list[dict]) -> None:
+    for p in posts:
+        try:
+            post("/api/taste/signal", {"kind": kind, "post": {k: p.get(k) for k in ("urls", "pin_url", "color", "source", "artist")}})
+        except AppError:
+            pass
 
 
 # ─── Status & accounts ───────────────────────────────────────────────────────
@@ -216,42 +317,51 @@ def _err(e: Exception) -> str:
 @mcp.tool()
 def japw_status() -> str:
     """Accounts, library size, download folder and taste profile. Call this first if unsure what's set up."""
-    cfg = load_config()
-    return json.dumps({
-        "pinterest_connected": ps.has_session(),
-        "x_connected": xs.has_x_session(),
-        "download_folder": cfg.get("download_folder"),
-        "likes": len(lib.list_likes()),
-        "collections": [{"name": c["name"], "pins": c["count"]} for c in lib.list_collections()],
-        "downloads": len(lib.downloaded()),
-        "x_artists": [a.get("username") for a in xs.load_artists()],
-        "for_you_profile": taste.summary(),
-        "filters": {"hide_promoted": cfg.get("filter_promoted", True), "hide_ai": cfg.get("filter_ai_content", False)},
-        "data_folder": str(get_app_data_dir().resolve()),
-    }, indent=1)
+    try:
+        cfg = get("/api/settings")
+        return json.dumps({
+            "pinterest_connected": get("/api/auth/status").get("connected"),
+            "x_connected": get("/x/auth/status").get("connected"),
+            "download_folder": cfg.get("download_folder"),
+            "likes": len(get("/api/likes").get("posts", [])),
+            "collections": [{"name": c["name"], "pins": c["count"]} for c in get("/api/collections").get("collections", [])],
+            "downloads": len(get("/api/downloads").get("keys", [])),
+            "x_artists": [a.get("username") for a in get("/x/artists")],
+            "for_you_profile": get("/api/taste"),
+            "filters": {"hide_promoted": cfg.get("filter_promoted", True), "hide_ai": cfg.get("filter_ai_content", False)},
+        }, indent=1, ensure_ascii=False)
+    except Exception as e:
+        return _err(e)
 
 
 @mcp.tool()
 def sync_pinterest_login() -> str:
     """Copy the Pinterest login from the user's installed browsers (Chrome, Edge, Firefox, Zen…). The user must be logged in on pinterest.com there."""
-    from japw.pinterest import session
-
     try:
-        session.sync_session_from_installed_browsers()
-        session._notify()
+        try:
+            post("/api/auth/login")
+        except AppError as e:
+            if "already" not in str(e).lower():
+                raise
+        for _ in range(120):
+            st = get("/api/auth/status")
+            if not st.get("login_in_progress"):
+                if st.get("last_error"):
+                    return f"Sync failed: {st['last_error']}"
+                return "Pinterest login synced." if st.get("connected") else "No Pinterest login found."
+            time.sleep(0.5)
+        return "Still syncing — check again in a moment."
     except Exception as e:
-        return f"Sync failed: {e}"
-    return "Pinterest login synced." if ps.has_session() else "No Pinterest login found in installed browsers."
+        return _err(e)
 
 
 @mcp.tool()
 def sync_x_login() -> str:
     """Copy the X (Twitter) login from the user's installed browsers, for the artist tools."""
     try:
-        xs.sync_x_session_from_browsers()
-        xs.reload_x_session()
+        post("/x/auth/sync")
     except Exception as e:
-        return f"Sync failed: {e}"
+        return f"Sync failed: {_err(e)}"
     return "X login synced."
 
 
@@ -265,56 +375,60 @@ def search_pins(
     offset: Offset = 0,
     preview: Preview = True,
 ) -> list:
-    """Search Pinterest. Optionally only pins of one colour. Works logged out too (logged in, results follow the user's account)."""
+    """Search Pinterest. Optionally only pins of one colour."""
     try:
-        posts, more = ps.search(query, offset, count, color=color)
+        posts, hdr = _paged(get("/api/search", q=query, offset=offset, limit=count, color=color), offset, query=query, color=color)
     except Exception as e:
         return [_err(e)]
-    return _listing(posts, _page_header(offset, posts, more, query=query, color=color), preview, offset)
+    return _listing(posts[:count], hdr, preview, offset)
 
 
 @mcp.tool()
 def home_feed(count: Count = 24, color: Color | None = None, offset: Offset = 0, refresh: bool = False, preview: Preview = True) -> list:
     """The user's personalised Pinterest home feed. refresh=True starts a fresh feed from the top."""
     try:
-        posts, more = ps.home(offset, count, refresh=refresh, color=color)
+        posts, hdr = _paged(get("/api/home", offset=offset, limit=count, color=color, refresh=1 if refresh else None),
+                            offset, feed="home", color=color)
     except Exception as e:
         return [_err(e)]
-    return _listing(posts, _page_header(offset, posts, more, feed="home", color=color), preview, offset)
+    return _listing(posts[:count], hdr, preview, offset)
 
 
 @mcp.tool()
 def for_you_feed(count: Count = 24, color: Color | None = None, offset: Offset = 0, refresh: bool = False, preview: Preview = True) -> list:
     """JAPW's For You feed: more of what the user likes, built from pins they opened / liked / downloaded / collected."""
     try:
-        posts, more, personal = ps.for_you(offset, count, refresh=refresh, color=color)
+        data = get("/api/foryou", offset=offset, limit=count, color=color, refresh=1 if refresh else None)
+        note = None if data.get("personalised", True) else "Not personalised yet — showing the home feed."
+        posts, hdr = _paged(data, offset, feed="for_you", color=color, note=note)
     except Exception as e:
         return [_err(e)]
-    note = None if personal else "Not personalised yet (no taste signals) — showing the home feed."
-    return _listing(posts, _page_header(offset, posts, more, feed="for_you", color=color, note=note), preview, offset)
+    return _listing(posts[:count], hdr, preview, offset)
 
 
-def _pin_id(post: dict) -> str | None:
-    link = post.get("pin_url") or ""
-    pid = link.rstrip("/").rsplit("/", 1)[-1] if "/pin/" in link else ""
-    return pid if pid.isdigit() else None
+def _visual(data: bytes | None = None, url: str | None = None) -> str:
+    if data is not None:
+        return api("POST", "/api/visual", files={"image": ("image.jpg", data, "application/octet-stream")})["id"]
+    return post("/api/visual", {"url": url})["id"]
 
 
 @mcp.tool()
 def similar_pins(ref: Annotated[str, Field(description="A pin ref or image URL")], count: Count = 24, preview: Preview = True) -> list:
     """Pins similar to one pin. Uses Pinterest's "more like this" for Pinterest pins, visual search for anything else (X art, plain image URLs)."""
     try:
-        post = _resolve(ref)
-        pid = _pin_id(post)
-        if pid and ps.has_session():
-            posts = ps.related(pid, limit=count)
-            how = "related"
-        else:
-            from japw import visual
-
-            sid = visual.start(visual.fetch_image(_thumb_url(post["urls"][0], 736)))
-            posts, _ = visual.page(sid, 0, count)
+        p = _resolve(ref)
+        link = p.get("pin_url") or ""
+        posts: list[dict] = []
+        how = "related"
+        if "pinterest.com/pin/" in link:
+            try:
+                posts = post("/api/pin/related", {"pin_url": link, "exclude_urls": p["urls"]}).get("posts", [])
+            except AppError:
+                posts = []
+        if not posts:
             how = "visual"
+            sid = _visual(url=_thumb_url(p["urls"][0], 736))
+            posts = get(f"/api/visual/{sid}", offset=0, limit=count).get("posts", [])
     except Exception as e:
         return [_err(e)]
     return _listing(posts[:count], {"similar_to": ref, "method": how}, preview)
@@ -328,29 +442,26 @@ def search_by_image(
     preview: Preview = True,
 ) -> list:
     """Find pins that look like a picture (Pinterest visual search). Accepts refs, image URLs or files on this computer."""
-    from japw import visual
-
     try:
         src = image.strip()
-        p = Path(src.strip('"'))
-        if not src.startswith("http") and p.is_file():
-            data = p.read_bytes()
-        elif src.startswith("https://") and not is_allowed_image_url(src):
-            data = visual.fetch_image(src)
+        path = Path(src.strip('"'))
+        if not src.startswith("http") and path.is_file():
+            sid = _visual(data=path.read_bytes())
+        elif src.startswith("https://") and not _is_cdn(src):
+            sid = _visual(url=src)
         else:
-            data = visual.fetch_image(_thumb_url(_resolve(src)["urls"][0], 736))
-        sid = visual.start(data)
-        posts, more = visual.page(sid, offset, count)
+            sid = _visual(url=_thumb_url(_resolve(src)["urls"][0], 736))
+        posts, hdr = _paged(get(f"/api/visual/{sid}", offset=offset, limit=count), offset, searched_image=src)
     except Exception as e:
         return [_err(e)]
-    return _listing(posts, _page_header(offset, posts, more, searched_image=src), preview, offset)
+    return _listing(posts[:count], hdr, preview, offset)
 
 
 @mcp.tool()
 def search_suggestions(text: str) -> str:
     """Pinterest's autocomplete suggestions — useful for refining a search."""
     try:
-        return json.dumps(ps.suggestions(text), ensure_ascii=False)
+        return json.dumps(get("/api/search/suggest", q=text).get("suggestions", []), ensure_ascii=False)
     except Exception:
         return "[]"
 
@@ -364,50 +475,57 @@ def view_pins(refs: Refs, size: Literal["medium", "large"] = "medium") -> list:
     px = 474 if size == "medium" else 736
     for r in refs[:6]:
         try:
-            post = _resolve(r)
+            p = _resolve(r)
         except ValueError as e:
             out.append(str(e))
             continue
-        data = _fetch_image(_thumb_url(post["urls"][0], px))
-        out.append(json.dumps(_summary(post)))
+        data = _fetch_image(_thumb_url(p["urls"][0], px))
+        out.append(json.dumps(_summary(p), ensure_ascii=False))
         if data:
             out.append(Image(data=data, format="png" if data[:4] == b"\x89PNG" else "jpeg"))
     return out
+
+
+def _collections_containing(key: str) -> list[str]:
+    names = []
+    for c in get("/api/collections").get("collections", []):
+        cposts = get(f"/api/collections/{c['id']}/posts").get("posts", [])
+        if any(p.get("key") == key for p in cposts):
+            names.append(c["name"])
+    return names
 
 
 @mcp.tool()
 def pin_details(ref: Annotated[str, Field(description="A pin ref or image URL")]) -> str:
     """Everything known about a pin: all image URLs (carousel slides), size, colour, link, and whether it's liked / downloaded / in collections."""
     try:
-        post = _resolve(ref)
-    except ValueError as e:
-        return str(e)
-    key = canonical_key(post["urls"][0])
-    cols = []
-    for c in lib.list_collections():
-        _, cposts = lib.collection_posts(c["id"])
-        if any(p.get("key") == key for p in cposts):
-            cols.append(c["name"])
-    info = _summary(post)
-    info.update({
-        "all_images": post["urls"],
-        "liked": lib.is_liked(post["urls"]),
-        "downloaded_to": lib.downloaded().get(key),
-        "in_collections": cols,
-        "hex_color": post.get("color"),
-    })
-    return json.dumps(info, indent=1, ensure_ascii=False)
+        p = _resolve(ref)
+        key = canonical_key(p["urls"][0])
+        info = _summary(p)
+        info.update({
+            "all_images": p["urls"],
+            "liked": any(x.get("key") == key for x in get("/api/likes").get("posts", [])),
+            "downloaded": key in set(get("/api/downloads").get("keys", [])),
+            "in_collections": _collections_containing(key),
+            "hex_color": p.get("color"),
+        })
+        return json.dumps(info, indent=1, ensure_ascii=False)
+    except Exception as e:
+        return _err(e)
 
 
 @mcp.tool()
 def pin_colors(refs: Refs) -> str:
     """Dominant colour (name + hex) of pins — measures it when Pinterest didn't provide one (X art, plain URLs)."""
-    posts = _resolve_many(refs)
-    missing = [(canonical_key(p["urls"][0]), p["urls"][0]) for p in posts if not p.get("color")]
-    measured = dominant_colors(missing) if missing else {}
+    try:
+        posts = _resolve_many(refs)
+        missing = [p["urls"][0] for p in posts if not p.get("color")]
+        measured = post("/api/colors", {"urls": missing}).get("colors", {}) if missing else {}
+    except Exception as e:
+        return _err(e)
     out = []
-    for r, p in zip(refs, posts):
-        hexc = p.get("color") or measured.get(canonical_key(p["urls"][0]))
+    for p in posts:
+        hexc = p.get("color") or measured.get(p["urls"][0])
         out.append({"ref": _remember(p), "hex": hexc, "color": color_bucket(hexc)})
     return json.dumps(out)
 
@@ -418,10 +536,10 @@ def pin_colors(refs: Refs) -> str:
 def list_boards() -> str:
     """The user's Pinterest boards."""
     try:
-        boards = ps.my_boards()
+        boards = get("/api/boards").get("boards", [])
     except Exception as e:
         return _err(e)
-    return json.dumps([{k: b[k] for k in ("id", "name", "count", "secret")} for b in boards], indent=1, ensure_ascii=False)
+    return json.dumps([{k: b.get(k) for k in ("id", "name", "count", "secret")} for b in boards], indent=1, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -433,15 +551,15 @@ def board_pins(
 ) -> list:
     """Pins on one of the user's boards."""
     try:
-        boards = ps.my_boards()
+        boards = get("/api/boards").get("boards", [])
         b = next((x for x in boards if x["id"] == board), None) or \
             next((x for x in boards if x["name"].lower() == board.strip().lower()), None)
         if not b:
             return [f"No board named '{board}'. Boards: {', '.join(x['name'] for x in boards)}"]
-        posts, more = ps.board_pins(b["id"], b.get("url", ""), offset, count)
+        posts, hdr = _paged(get(f"/api/boards/{b['id']}/pins", offset=offset, limit=count, url=b.get("url", "")), offset, board=b["name"])
     except Exception as e:
         return [_err(e)]
-    return _listing(posts, _page_header(offset, posts, more, board=b["name"]), preview, offset)
+    return _listing(posts[:count], hdr, preview, offset)
 
 
 # ─── X artists ───────────────────────────────────────────────────────────────
@@ -449,37 +567,30 @@ def board_pins(
 @mcp.tool()
 def list_artists() -> str:
     """X artists the user follows in JAPW."""
-    return json.dumps([{k: a.get(k) for k in ("username", "display_name")} for a in xs.load_artists()], ensure_ascii=False)
+    try:
+        return json.dumps([{k: a.get(k) for k in ("username", "display_name")} for a in get("/x/artists")], ensure_ascii=False)
+    except Exception as e:
+        return _err(e)
 
 
 @mcp.tool()
 def add_artist(username: Annotated[str, Field(description="X handle or profile link")]) -> str:
     """Follow an X artist in JAPW's Artists tab."""
-    u = username.strip().lstrip("@")
-    if ".com/" in u:
-        u = u.split(".com/", 1)[1].split("/")[0].split("?")[0]
-    if not u.replace("_", "").isalnum():
-        return "That doesn't look like an X username."
-    if xs.artist_exists(u):
-        return f"@{u} is already followed."
-    artist = {"username": u, "display_name": u, "avatar_url": None}
-    if xs.has_x_session():
-        try:
-            info = xs.fetch_user_info(u)
-            artist.update(username=info["username"], display_name=info["display_name"], avatar_url=info["avatar_url"])
-        except Exception as e:
-            return _err(e)
-    import time
-
-    artist["added_at"] = int(time.time())
-    xs.add_artist(artist)
-    return f"Now following @{artist['username']} ({artist['display_name']})."
+    try:
+        a = post("/x/artists", {"username": username})
+    except Exception as e:
+        return _err(e)
+    return f"Now following @{a.get('username')} ({a.get('display_name')})."
 
 
 @mcp.tool()
 def remove_artist(username: str) -> str:
     """Stop following an X artist in JAPW."""
-    return f"Removed @{username.lstrip('@')}." if xs.remove_artist(username.lstrip("@")) else "Not in the list."
+    try:
+        ok = api("DELETE", f"/x/artists/{username.lstrip('@')}").get("ok")
+    except Exception as e:
+        return _err(e)
+    return f"Removed @{username.lstrip('@')}." if ok else "Not in the list."
 
 
 @mcp.tool()
@@ -491,81 +602,110 @@ def artist_media(
     preview: Preview = True,
 ) -> list:
     """Images posted by X artists (one artist, or everyone the user follows)."""
-    if not xs.has_x_session():
-        return ["Not connected to X — ask the user to log in on x.com, then call sync_x_login."]
     try:
-        posts, more = xs.media(username.lstrip("@") if username else None, offset, count, refresh=refresh)
+        data = get("/x/media", username=username.lstrip("@") if username else None, offset=offset, limit=count,
+                   refresh=1 if refresh else None)
+        posts, hdr = _paged(data, offset, artist=username or "all")
     except Exception as e:
         return [_err(e)]
-    return _listing(posts, _page_header(offset, posts, more, artist=username or "all"), preview, offset)
+    return _listing(posts[:count], hdr, preview, offset)
 
 
 # ─── Likes ───────────────────────────────────────────────────────────────────
 
-def _signal(kind: str, posts: list[dict]) -> None:
+def _liked_keys() -> set[str]:
+    return {p.get("key") for p in get("/api/likes").get("posts", [])}
+
+
+def _set_liked(posts: list[dict], liked: bool) -> int:
+    keys = _liked_keys()
+    changed = 0
     for p in posts:
-        taste.record(kind, p)
+        if (canonical_key(p["urls"][0]) in keys) != liked:
+            post("/api/likes/toggle", {"urls": p["urls"], "color": p.get("color"), "pin_url": p.get("pin_url")})
+            changed += 1
+    return changed
 
 
 @mcp.tool()
 def list_liked(count: Count = 30, offset: Offset = 0, color: Color | None = None, preview: Preview = True) -> list:
     """The user's liked pins (newest first), optionally only one colour."""
-    posts = [{"urls": p["urls"], "color": p.get("color"), "pin_url": p.get("pin_url")} for p in lib.list_likes() if p.get("urls")]
-    if color:
-        need = [(canonical_key(p["urls"][0]), p["urls"][0]) for p in posts if not p.get("color")]
-        measured = dominant_colors(need) if need else {}
-        for p in posts:
-            p["color"] = p.get("color") or measured.get(canonical_key(p["urls"][0]))
-        posts = [p for p in posts if color_bucket(p.get("color")) == color]
+    try:
+        posts = [{"urls": p["urls"], "color": p.get("color"), "pin_url": p.get("pin_url")}
+                 for p in get("/api/likes").get("posts", []) if p.get("urls")]
+        if color:
+            missing = [p["urls"][0] for p in posts if not p.get("color")]
+            measured = post("/api/colors", {"urls": missing}).get("colors", {}) if missing else {}
+            for p in posts:
+                p["color"] = p.get("color") or measured.get(p["urls"][0])
+            posts = [p for p in posts if color_bucket(p.get("color")) == color]
+    except Exception as e:
+        return [_err(e)]
     page = posts[offset:offset + count]
-    return _listing(page, _page_header(offset, page, offset + count < len(posts), total=len(posts), color=color), preview, offset)
+    hdr = {"color": color, "total": len(posts), "offset": offset, "next_offset": offset + len(page),
+           "has_more": offset + count < len(posts)}
+    return _listing(page, hdr, preview, offset)
 
 
 @mcp.tool()
 def like_pins(refs: Refs) -> str:
     """Like pins (they appear in the app's Liked tab)."""
-    posts = _resolve_many(refs)
-    for p in posts:
-        lib.set_like(p["urls"], True, p.get("color"), p.get("pin_url"))
-    _signal("like", posts)
-    return f"Liked {len(posts)} pin(s)."
+    try:
+        posts = _resolve_many(refs)
+        n = _set_liked(posts, True)
+    except Exception as e:
+        return _err(e)
+    return f"Liked {n} pin(s)" + (f" ({len(posts) - n} already liked)." if n < len(posts) else ".")
 
 
 @mcp.tool()
 def unlike_pins(refs: Refs) -> str:
     """Remove pins from the user's likes."""
-    posts = _resolve_many(refs)
-    for p in posts:
-        lib.set_like(p["urls"], False)
-    return f"Unliked {len(posts)} pin(s)."
+    try:
+        n = _set_liked(_resolve_many(refs), False)
+    except Exception as e:
+        return _err(e)
+    return f"Unliked {n} pin(s)."
 
 
 # ─── Collections ─────────────────────────────────────────────────────────────
 
+def _collections() -> list[dict]:
+    return get("/api/collections").get("collections", [])
+
+
 def _collection(name_or_id: str, create: bool = False) -> dict:
-    col = lib.find_collection(name_or_id)
+    cols = _collections()
+    needle = name_or_id.strip().lower()
+    col = next((c for c in cols if c["id"] == name_or_id), None) or \
+        next((c for c in cols if c["name"].strip().lower() == needle), None)
     if col:
         return col
     if create:
-        made = lib.create_collection(name_or_id)
-        return lib.find_collection(made["id"])
-    names = ", ".join(c["name"] for c in lib.list_collections()) or "none yet"
+        return post("/api/collections", {"name": name_or_id.strip()})["collection"]
+    names = ", ".join(c["name"] for c in cols) or "none yet"
     raise ValueError(f"No collection '{name_or_id}'. Collections: {names}")
 
 
 @mcp.tool()
 def list_collections() -> str:
     """The user's JAPW collections (local folders of pins)."""
-    return json.dumps([{k: c[k] for k in ("id", "name", "count")} for c in lib.list_collections()], ensure_ascii=False, indent=1)
+    try:
+        return json.dumps([{k: c[k] for k in ("id", "name", "count")} for c in _collections()], ensure_ascii=False, indent=1)
+    except Exception as e:
+        return _err(e)
 
 
 @mcp.tool()
 def create_collection(name: str) -> str:
     """Create a new collection."""
-    existing = lib.find_collection(name)
-    if existing:
-        return f"A collection named '{existing['name']}' already exists."
-    col = lib.create_collection(name)
+    try:
+        existing = next((c for c in _collections() if c["name"].strip().lower() == name.strip().lower()), None)
+        if existing:
+            return f"A collection named '{existing['name']}' already exists."
+        col = post("/api/collections", {"name": name})["collection"]
+    except Exception as e:
+        return _err(e)
     return f"Created collection '{col['name']}'."
 
 
@@ -574,9 +714,9 @@ def rename_collection(collection: Annotated[str, Field(description="Collection n
     """Rename a collection."""
     try:
         col = _collection(collection)
-        lib.rename_collection(col["id"], new_name)
+        api("PATCH", f"/api/collections/{col['id']}", json={"name": new_name})
     except Exception as e:
-        return str(e)
+        return _err(e)
     return f"Renamed '{col['name']}' to '{new_name}'."
 
 
@@ -590,9 +730,9 @@ def delete_collection(
         return "Not deleted: pass confirm=true once the user has confirmed."
     try:
         col = _collection(collection)
-        lib.delete_collection(col["id"])
+        api("DELETE", f"/api/collections/{col['id']}")
     except Exception as e:
-        return str(e)
+        return _err(e)
     return f"Deleted collection '{col['name']}'."
 
 
@@ -606,12 +746,14 @@ def collection_pins(
     """Pins in one collection."""
     try:
         col = _collection(collection)
-        name, cposts = lib.collection_posts(col["id"])
+        data = get(f"/api/collections/{col['id']}/posts")
     except Exception as e:
-        return [str(e)]
-    posts = [{"urls": p["urls"], "color": p.get("color"), "pin_url": p.get("pin_url")} for p in cposts if p.get("urls")]
+        return [_err(e)]
+    posts = [{"urls": p["urls"], "color": p.get("color"), "pin_url": p.get("pin_url")} for p in data.get("posts", []) if p.get("urls")]
     page = posts[offset:offset + count]
-    return _listing(page, _page_header(offset, page, offset + count < len(posts), collection=name, total=len(posts)), preview, offset)
+    hdr = {"collection": data.get("name", col["name"]), "total": len(posts), "offset": offset,
+           "next_offset": offset + len(page), "has_more": offset + count < len(posts)}
+    return _listing(page, hdr, preview, offset)
 
 
 @mcp.tool()
@@ -624,9 +766,15 @@ def add_to_collection(
     try:
         col = _collection(collection, create=create_if_missing)
         posts = _resolve_many(refs)
+        have = {p.get("key") for p in get(f"/api/collections/{col['id']}/posts").get("posts", [])}
+        added = 0
+        for p in posts:
+            if canonical_key(p["urls"][0]) in have:
+                continue
+            post(f"/api/collections/{col['id']}/posts", {"urls": p["urls"], "color": p.get("color"), "pin_url": p.get("pin_url")})
+            added += 1
     except Exception as e:
-        return str(e)
-    added = sum(lib.add_to_collection(col["id"], p["urls"], p.get("color"), p.get("pin_url")) for p in posts)
+        return _err(e)
     _signal("collect", posts)
     return f"Added {added} pin(s) to '{col['name']}'" + (f" ({len(posts) - added} were already there)." if added < len(posts) else ".")
 
@@ -637,10 +785,11 @@ def remove_from_collection(collection: Annotated[str, Field(description="Collect
     try:
         col = _collection(collection)
         posts = _resolve_many(refs)
+        for p in posts:
+            api("DELETE", f"/api/collections/{col['id']}/posts", json={"key": canonical_key(p["urls"][0])})
     except Exception as e:
-        return str(e)
-    removed = sum(lib.remove_from_collection(col["id"], canonical_key(p["urls"][0])) for p in posts)
-    return f"Removed {removed} pin(s) from '{col['name']}'."
+        return _err(e)
+    return f"Removed {len(posts)} pin(s) from '{col['name']}'."
 
 
 # ─── Downloads & sharing ─────────────────────────────────────────────────────
@@ -653,7 +802,11 @@ def download_pins(
     name: Annotated[str | None, Field(description="Optional base file name (numbered automatically)")] = None,
 ) -> str:
     """Save pins at full resolution to the user's download folder. Never overwrites existing files."""
-    posts = _resolve_many(refs)
+    try:
+        posts = _resolve_many(refs)
+        _ensure_app()
+    except Exception as e:
+        return _err(e)
     jobs = []
     for i, p in enumerate(posts):
         key = canonical_key(p["urls"][0])
@@ -661,57 +814,52 @@ def download_pins(
         for j, u in enumerate(urls):
             base = None
             if name:
-                base = f"{name} {i + 1}" + (f"-{j + 1}" if len(urls) > 1 else "") if len(posts) > 1 or len(urls) > 1 else name
-            jobs.append((u, key, base))
+                base = name if len(posts) == 1 and len(urls) == 1 else f"{name} {i + 1}" + (f"-{j + 1}" if len(urls) > 1 else "")
+            jobs.append({"url": u, "key": key, "subfolder": subfolder, "name": base})
 
     def run(job):
-        u, key, base = job
         try:
-            return lib.download(u, key, subfolder=subfolder, name=base), None
+            return post("/api/download", job).get("path"), None
         except Exception as e:
-            return None, f"{u}: {e}"
+            return None, f"{job['url']}: {_err(e)}"
 
-    results = list(_thumb_pool.map(run, jobs))
+    results = list(_pool.map(run, jobs))
     saved = [p for p, _ in results if p]
     errors = [e for _, e in results if e]
     _signal("download", posts)
-    folder = os.path.dirname(saved[0]) if saved else lib.download_folder()
-    return json.dumps({"saved": len(saved), "folder": folder, "files": saved, "errors": errors}, indent=1, ensure_ascii=False)
+    return json.dumps({"saved": len(saved), "folder": os.path.dirname(saved[0]) if saved else None,
+                       "files": saved, "errors": errors}, indent=1, ensure_ascii=False)
 
 
 @mcp.tool()
-def list_downloads(limit: Annotated[int, Field(ge=1, le=500)] = 50) -> str:
-    """Recently downloaded files (newest last) and whether they still exist."""
-    items = list(lib.downloaded().items())[-limit:]
-    return json.dumps([{"file": path, "exists": os.path.isfile(path)} for _, path in items], indent=1, ensure_ascii=False)
+def list_downloads() -> str:
+    """How many images have been downloaded with JAPW, and where the download folder is."""
+    try:
+        return json.dumps({"downloaded": len(get("/api/downloads").get("keys", [])),
+                           "folder": get("/api/settings").get("download_folder")}, ensure_ascii=False)
+    except Exception as e:
+        return _err(e)
 
 
 @mcp.tool()
 def open_download_folder() -> str:
     """Open the download folder in Explorer for the user."""
-    folder = lib.download_folder()
-    if not os.path.isdir(folder):
-        return "The download folder doesn't exist yet."
-    if sys.platform == "win32":
-        os.startfile(folder)
-    else:
-        webbrowser.open("file://" + folder)
-    return f"Opened {folder}"
+    try:
+        post("/api/reveal", {})
+    except Exception as e:
+        return _err(e)
+    return "Opened the download folder."
 
 
 @mcp.tool()
 def copy_image(ref: Annotated[str, Field(description="A pin ref or image URL")]) -> str:
-    """Put a pin's image on the clipboard (the user can paste it into Discord, Photoshop…). Windows only."""
-    from japw.clipboard import ClipboardUnavailable, copy_image as clip
-
+    """Put a pin's image on the clipboard (the user can paste it into Discord, Photoshop…)."""
     try:
-        post = _resolve(ref)
-        clip(fetch_png(post["urls"][0]))
-    except ClipboardUnavailable as e:
-        return str(e)
+        p = _resolve(ref)
+        post("/api/clipboard", {"url": p["urls"][0]})
     except Exception as e:
         return _err(e)
-    _signal("copy", [post])
+    _signal("copy", [p])
     return "Image copied to the clipboard."
 
 
@@ -719,11 +867,11 @@ def copy_image(ref: Annotated[str, Field(description="A pin ref or image URL")])
 def open_pin(ref: Annotated[str, Field(description="A pin ref or image URL")]) -> str:
     """Open a pin on Pinterest / X (or the image itself) in the user's browser."""
     try:
-        post = _resolve(ref)
-    except ValueError as e:
-        return str(e)
-    url = post.get("pin_url") or post["urls"][0]
-    webbrowser.open(url)
+        p = _resolve(ref)
+        url = p.get("pin_url") or p["urls"][0]
+        post("/api/open-url", {"url": url})
+    except Exception as e:
+        return _err(e)
     return f"Opened {url}"
 
 
@@ -732,7 +880,10 @@ def open_pin(ref: Annotated[str, Field(description="A pin ref or image URL")]) -
 @mcp.tool()
 def get_settings() -> str:
     """JAPW settings (download folder, filters, wallpaper filter)."""
-    return json.dumps(load_config(), indent=1, ensure_ascii=False)
+    try:
+        return json.dumps(get("/api/settings"), indent=1, ensure_ascii=False)
+    except Exception as e:
+        return _err(e)
 
 
 @mcp.tool()
@@ -744,33 +895,30 @@ def update_settings(
     min_width: Annotated[int | None, Field(ge=1, le=16384)] = None,
     min_height: Annotated[int | None, Field(ge=1, le=16384)] = None,
 ) -> str:
-    """Change JAPW settings. The app picks them up next time it loads settings."""
-    cfg = load_config()
-    changes = {}
-    if download_folder:
-        p = Path(download_folder).expanduser()
-        if not p.is_absolute():
-            return "download_folder must be an absolute path."
-        p.mkdir(parents=True, exist_ok=True)
-        changes["download_folder"] = str(p)
-    for key, val in (("filter_promoted", hide_promoted), ("filter_ai_content", hide_ai_content),
-                     ("resolution_filter_enabled", wallpaper_filter),
-                     ("resolution_target_width", min_width), ("resolution_target_height", min_height)):
-        if val is not None:
-            changes[key] = val
+    """Change JAPW settings."""
+    if download_folder and not Path(download_folder).expanduser().is_absolute():
+        return "download_folder must be an absolute path."
+    changes = {k: v for k, v in {
+        "download_folder": download_folder, "filter_promoted": hide_promoted, "filter_ai_content": hide_ai_content,
+        "resolution_filter_enabled": wallpaper_filter, "resolution_target_width": min_width,
+        "resolution_target_height": min_height,
+    }.items() if v is not None}
     if not changes:
         return "Nothing to change."
-    cfg.update(changes)
-    save_config(None, cfg)
-    set_content_filters(cfg.get("filter_promoted", True), cfg.get("filter_ai_content", False))
-    feeds.cache.clear()
+    try:
+        post("/api/settings", changes)
+    except Exception as e:
+        return _err(e)
     return "Updated: " + ", ".join(f"{k}={v}" for k, v in changes.items())
 
 
 @mcp.tool()
 def taste_profile() -> str:
     """What the For You feed has learned: interaction counts and favourite colours."""
-    return json.dumps(taste.summary(), indent=1)
+    try:
+        return json.dumps(get("/api/taste"), indent=1)
+    except Exception as e:
+        return _err(e)
 
 
 # ─── Prompts ─────────────────────────────────────────────────────────────────

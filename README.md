@@ -137,7 +137,7 @@ That runs **PyInstaller** with **`JAPW.spec`**: one file, no console window, bun
 
 JAPW ships an [MCP](https://modelcontextprotocol.io) server, so Claude (or any MCP client) can do what you do in the app: *"find me 10 dark misty forest wallpapers, check they're high-res, download them into a 'forest' folder and add them to a collection"*.
 
-It uses the same data as the installed app (`%APPDATA%\JAPW`): your logins, likes, collections, download folder and For You profile. The app doesn't need to be open.
+The server works through the JAPW app's local API, so everything it does shows up in the app straight away (your logins, likes, collections, downloads and For You profile). If the app isn't open, the server starts it — it looks for `dist\JAPW\JAPW.exe` next to the source, or set `JAPW_EXE` to your exe's path. (It never writes JAPW's files itself: clients installed from the Microsoft Store, like Claude Desktop, get a private redirected copy of `%APPDATA%`, which the app can't see.)
 
 **Claude Code**
 
