@@ -18,6 +18,8 @@ ALLOWED_HOSTS = ("i.pinimg.com", "v.pinimg.com", "pbs.twimg.com", "video.twimg.c
 
 _http = requests.Session()
 _http.headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) JAPW"
+# Thumbnails / colours are fetched ~12 at a time; size the pool so connections are reused.
+_http.mount("https://", requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=24))
 
 
 def is_allowed_image_url(url: str) -> bool:
@@ -31,7 +33,9 @@ def is_allowed_image_url(url: str) -> bool:
 def small_variant(url: str) -> str:
     """A small rendition of the same image — enough to measure its colour."""
     if "i.pinimg.com" in url:
-        return re.sub(r"i\.pinimg\.com/(?:originals|\d+x(?:\d+)?)/", "i.pinimg.com/236x/", url, flags=re.I)
+        from japw.images import pinimg_sized
+
+        return pinimg_sized(url, "236x")
     if "pbs.twimg.com" in url:
         base = url.split("?")[0]
         return f"{base}?name=small" if "format=" not in url else re.sub(r"name=\w+", "name=small", url)

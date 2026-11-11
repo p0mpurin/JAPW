@@ -4,3 +4,4 @@ pinscrape==5.*
 browser-cookie3>=0.19.1
 requests==2.*
 pillow>=10.0
+mcp>=2.3,<3

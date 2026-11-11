@@ -138,6 +138,22 @@ def get_client() -> PinterestClient:
         return _client
 
 
+_anon: PinterestClient | None = None
+
+
+def get_anon_client() -> PinterestClient:
+    """A cookie-less client: public endpoints such as search work without a login."""
+    global _anon
+    with _client_lock:
+        if _anon is None:
+            _anon = PinterestClient([])
+        return _anon
+
+
+def any_client() -> PinterestClient:
+    return get_client() if session.has_session() else get_anon_client()
+
+
 def reset_client() -> None:
     global _client
     with _client_lock:

@@ -55,3 +55,15 @@ def dedupe_pinimg_urls(urls: list[str]) -> list[str]:
         elif quality_score(u) > quality_score(best[key]):
             best[key] = u
     return [best[k] for k in order]
+
+
+def pinimg_sized(url: str, bucket: str) -> str:
+    """
+    The same pinimg image at a size bucket ("236x", "474x", "736x" or "originals").
+    Sized buckets only exist as .jpg — a .png/.gif/.webp original's 236x/… path 403s — so the
+    extension is switched too.
+    """
+    out = re.sub(r"i\.pinimg\.com/(?:originals|\d+x(?:\d+)?)/", f"i.pinimg.com/{bucket}/", url, flags=re.I)
+    if bucket != "originals":
+        out = re.sub(r"\.(png|gif|webp|jpeg)(?=$|\?)", ".jpg", out, flags=re.I)
+    return out

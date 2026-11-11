@@ -5,8 +5,11 @@ from pathlib import Path
 
 
 def get_app_data_dir() -> Path:
-    """Return persistent config directory. Uses APPDATA on Windows."""
-    if getattr(sys, "frozen", False):
+    """Return persistent config directory. JAPW_DATA_DIR overrides; the built app uses %APPDATA%\\JAPW."""
+    override = os.environ.get("JAPW_DATA_DIR")
+    if override:
+        base = Path(override)
+    elif getattr(sys, "frozen", False):
         base = Path(os.environ.get("APPDATA", Path.home())) / "JAPW"
     else:
         base = Path(".")

@@ -13,7 +13,7 @@ from urllib.parse import quote_plus
 from japw import taste
 from japw.colors import SEARCH_WORDS
 from japw.feeds import Feed, cache as _feeds, merged_pages
-from japw.pinterest.client import get_client
+from japw.pinterest.client import any_client, get_client
 from japw.pinterest.errors import PinterestSessionError
 from japw.images import canonical_key
 from japw.pinterest.parse import pins_to_posts
@@ -55,7 +55,7 @@ def _search_page(query: str):
     source = f"/search/pins/?q={quote_plus(query)}&rs=typed"
 
     def fetch(bookmark):
-        rr = get_client().resource("BaseSearchResource", _with_bookmark({
+        rr = any_client().resource("BaseSearchResource", _with_bookmark({
             "query": query, "scope": "pins", "rs": "typed", "page_size": PAGE_SIZE,
             "no_fetch_context_on_resource": False,
         }, bookmark), source)
@@ -132,7 +132,7 @@ def home(offset: int = 0, limit: int = PAGE_SIZE, refresh: bool = False, color: 
 
 
 def search(query: str, offset: int = 0, limit: int = PAGE_SIZE, color: str | None = None):
-    _require_session()
+    """Works logged out too (public search); logged in, results follow your account."""
     q = query.strip()
     base = _search_feed(q)
     if color in SEARCH_WORDS:

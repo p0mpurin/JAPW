@@ -13,7 +13,7 @@ def fake_response(content=b"\x89PNG\r\n\x1a\nfake", content_type="image/png"):
 
 
 def test_download_saves_file_and_indexes_key(client):
-    with patch("japw.routes.library.requests.get", return_value=fake_response()):
+    with patch("japw.library.requests.get", return_value=fake_response()):
         r = client.post("/api/download", json={"url": IMG, "key": "aa/bb/one"})
     d = r.get_json()
     assert d["success"] and os.path.exists(d["path"]) and d["path"].endswith(".png")
@@ -21,7 +21,7 @@ def test_download_saves_file_and_indexes_key(client):
 
 
 def test_download_never_overwrites(client):
-    with patch("japw.routes.library.requests.get", return_value=fake_response()):
+    with patch("japw.library.requests.get", return_value=fake_response()):
         p1 = client.post("/api/download", json={"url": IMG}).get_json()["path"]
         p2 = client.post("/api/download", json={"url": IMG}).get_json()["path"]
     assert p1 != p2 and os.path.exists(p1) and os.path.exists(p2)

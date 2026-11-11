@@ -133,6 +133,45 @@ That runs **PyInstaller** with **`JAPW.spec`**: one file, no console window, bun
 
 ---
 
+## Use JAPW from an AI assistant (MCP)
+
+JAPW ships an [MCP](https://modelcontextprotocol.io) server, so Claude (or any MCP client) can do what you do in the app: *"find me 10 dark misty forest wallpapers, check they're high-res, download them into a 'forest' folder and add them to a collection"*.
+
+It uses the same data as the installed app (`%APPDATA%\JAPW`): your logins, likes, collections, download folder and For You profile. The app doesn't need to be open.
+
+**Claude Code**
+
+```bash
+claude mcp add --scope user japw -- "C:\path\to\JAPW\venv\Scripts\python.exe" "C:\path\to\JAPW\japw_mcp.py"
+```
+
+**Claude Desktop / other clients** — add to the client's MCP config:
+
+```json
+{
+  "mcpServers": {
+    "japw": {
+      "command": "C:\\path\\to\\JAPW\\venv\\Scripts\\python.exe",
+      "args": ["C:\\path\\to\\JAPW\\japw_mcp.py"]
+    }
+  }
+}
+```
+
+**What the assistant can do** (36 tools):
+
+| Area | Tools |
+|---|---|
+| Find | `search_pins` (with colour), `home_feed`, `for_you_feed`, `similar_pins`, `search_by_image` (ref, URL or local file), `search_suggestions`, `board_pins`, `artist_media` |
+| Look | numbered contact-sheet images with every listing, `view_pins`, `pin_details`, `pin_colors` |
+| Library | `like_pins` / `unlike_pins` / `list_liked`, collections (create, rename, delete, add, remove, list) |
+| Save & share | `download_pins` (subfolders, names, all carousel slides), `list_downloads`, `open_download_folder`, `copy_image`, `open_pin` |
+| Accounts & settings | `japw_status`, `sync_pinterest_login`, `sync_x_login`, artists (add / remove / list), `get_settings`, `update_settings`, `taste_profile` |
+
+Every pin comes back with a short `ref` (like `p3f9a1c2`) that the other tools accept. Deleting a collection needs an explicit `confirm`. Two built-in prompts, `find_and_save` and `more_like_my_taste`, walk the assistant through common workflows.
+
+---
+
 ## API in one glance
 
 The UI talks to local Flask routes only, for example:

@@ -34,10 +34,12 @@ export function toPost(raw) {
 
 /** Swap a pinimg URL onto a given size bucket ("236x", "474x", "736x", "originals"). */
 export function pinimgSize(url, bucket) {
-  return String(url || "").replace(
+  const out = String(url || "").replace(
     /i\.pinimg\.com\/(?:originals|\d+x(?:\d+)?)\//i,
     `i.pinimg.com/${bucket}/`,
   );
+  // Sized buckets only exist as .jpg: a .png / .gif / .webp original's 236x path is a 403.
+  return bucket === "originals" ? out : out.replace(/\.(png|gif|webp|jpeg)(?=$|\?)/i, ".jpg");
 }
 
 /**
