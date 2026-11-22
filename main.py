@@ -2,7 +2,29 @@ import os
 import sys
 import threading
 
-import webview
+
+def _unblock_bundle() -> None:
+    """
+    A zip downloaded from the internet and extracted with Explorer marks every file as
+    "from the internet" (a Zone.Identifier stream). .NET then refuses to load pythonnet's
+    Python.Runtime.dll and the window can't open. Remove the mark from our own files.
+    """
+    base = getattr(sys, "_MEIPASS", None)
+    if sys.platform != "win32" or not base:
+        return
+    for root in {base, os.path.dirname(sys.executable)}:
+        for dirpath, _dirs, files in os.walk(root):
+            for name in files:
+                if name.lower().endswith((".dll", ".exe", ".pyd", ".config")):
+                    try:
+                        os.remove(os.path.join(dirpath, name) + ":Zone.Identifier")
+                    except OSError:
+                        pass
+
+
+_unblock_bundle()
+
+import webview  # noqa: E402
 
 from japw.api import create_app
 from japw.config import get_app_data_dir, load_window_state, save_window_state
